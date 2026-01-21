@@ -206,14 +206,39 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 		ImageID: pyxisResp.ID,
 	}
 
-	// Extract repository info including catalog URL and push date
+	// Extract size information
+	if pyxisResp.TotalSizeBytes > 0 {
+		certData.CompressedSizeBytes = pyxisResp.TotalSizeBytes
+	}
+
+	// Extract auto-rebuild setting
+	certData.AutoRebuildEnabled = pyxisResp.CanAutoReleaseCVERebuild
+
+	// Extract architectures from content_stream_grades
+	archSet := make(map[string]bool)
+	for _, grade := range pyxisResp.ContentStreamGrades {
+		if grade.Architecture != "" {
+			archSet[grade.Architecture] = true
+		}
+	}
+	for arch := range archSet {
+		certData.Architectures = append(certData.Architectures, arch)
+	}
+
+	// Extract repository info including catalog URL, push date, and lifecycle data
 	// Format: https://catalog.redhat.com/software/containers/{repository_id}
 	if len(pyxisResp.Repositories) > 0 {
 		repo := pyxisResp.Repositories[0]
-		// Query the repository endpoint to get the repository ID for the catalog URL
-		repoID := c.getRepositoryID(ctx, repo.Registry, repo.Repository)
-		if repoID != "" {
-			certData.CatalogURL = fmt.Sprintf("https://catalog.redhat.com/software/containers/%s", repoID)
+		// Query the repository endpoint to get full repository info
+		repoInfo := c.getRepositoryInfo(ctx, repo.Registry, repo.Repository)
+		if repoInfo != nil {
+			if repoInfo.ID != "" {
+				certData.CatalogURL = fmt.Sprintf("https://catalog.redhat.com/software/containers/%s", repoInfo.ID)
+			}
+			// Extract lifecycle fields
+			certData.EOLDate = repoInfo.EOLDate
+			certData.ReleaseCategory = repoInfo.ReleaseCategory
+			certData.ReplacedBy = repoInfo.ReplacedByRepositoryName
 		}
 		// Extract push date (when image was published)
 		if repo.PushDate != "" {
@@ -263,14 +288,22 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 	return certData, nil
 }
 
-// getRepositoryID fetches the repository ID from Pyxis for constructing catalog URLs
-func (c *HTTPClient) getRepositoryID(ctx context.Context, registry, repository string) string {
+// RepositoryInfo contains repository-level information from Pyxis
+type RepositoryInfo struct {
+	ID                       string
+	EOLDate                  string
+	ReleaseCategory          string
+	ReplacedByRepositoryName string
+}
+
+// getRepositoryInfo fetches repository information from Pyxis including lifecycle data
+func (c *HTTPClient) getRepositoryInfo(ctx context.Context, registry, repository string) *RepositoryInfo {
 	encodedRepo := url.PathEscape(repository)
 	requestURL := fmt.Sprintf("%s/repositories/registry/%s/repository/%s", c.baseURL, registry, encodedRepo)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return ""
+		return nil
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -280,28 +313,36 @@ func (c *HTTPClient) getRepositoryID(ctx context.Context, registry, repository s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return nil
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ""
+		return nil
 	}
 
-	// Parse just the _id field
-	var repoResp struct {
-		ID string `json:"_id"`
-	}
+	var repoResp PyxisContainerRepository
 	if err := json.Unmarshal(body, &repoResp); err != nil {
-		return ""
+		return nil
 	}
 
-	return repoResp.ID
+	info := &RepositoryInfo{
+		ID:                       repoResp.ID,
+		EOLDate:                  repoResp.EOLDate,
+		ReplacedByRepositoryName: repoResp.ReplacedByRepositoryName,
+	}
+
+	// Convert release_categories array to single category string (use first)
+	if len(repoResp.ReleaseCategories) > 0 {
+		info.ReleaseCategory = repoResp.ReleaseCategories[0]
+	}
+
+	return info
 }
 
 // getVulnerabilities fetches CVE IDs for an image from the Pyxis vulnerabilities endpoint

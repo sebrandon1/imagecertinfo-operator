@@ -256,6 +256,27 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 				Low:       certData.Vulnerabilities.Low,
 			}
 		}
+
+		// Lifecycle fields
+		if certData.EOLDate != "" {
+			// Parse EOL date (may be in different formats)
+			if eolTime, parseErr := time.Parse(time.RFC3339, certData.EOLDate); parseErr == nil {
+				eolDate := metav1.NewTime(eolTime)
+				cr.Status.PyxisData.EOLDate = &eolDate
+			} else if eolTime, parseErr := time.Parse("2006-01-02", certData.EOLDate); parseErr == nil {
+				eolDate := metav1.NewTime(eolTime)
+				cr.Status.PyxisData.EOLDate = &eolDate
+			}
+		}
+		cr.Status.PyxisData.ReleaseCategory = certData.ReleaseCategory
+		cr.Status.PyxisData.ReplacedBy = certData.ReplacedBy
+
+		// Operational fields
+		cr.Status.PyxisData.Architectures = certData.Architectures
+		cr.Status.PyxisData.CompressedSizeBytes = certData.CompressedSizeBytes
+
+		// Security fields
+		cr.Status.PyxisData.AutoRebuildEnabled = certData.AutoRebuildEnabled
 	}
 
 	// Update status first

@@ -90,6 +90,33 @@ type PyxisData struct {
 	// Vulnerabilities contains vulnerability counts by severity
 	// +optional
 	Vulnerabilities *VulnerabilitySummary `json:"vulnerabilities,omitempty"`
+
+	// Lifecycle fields
+
+	// EOLDate is the end-of-life date for this image
+	// +optional
+	EOLDate *metav1.Time `json:"eolDate,omitempty"`
+	// ReleaseCategory indicates the release status (e.g., Generally Available, Deprecated, Tech Preview)
+	// +optional
+	ReleaseCategory string `json:"releaseCategory,omitempty"`
+	// ReplacedBy is the repository name of the image that replaces this one (if deprecated)
+	// +optional
+	ReplacedBy string `json:"replacedBy,omitempty"`
+
+	// Operational fields
+
+	// Architectures lists the supported CPU architectures (e.g., amd64, arm64, s390x, ppc64le)
+	// +optional
+	Architectures []string `json:"architectures,omitempty"`
+	// CompressedSizeBytes is the compressed image size in bytes
+	// +optional
+	CompressedSizeBytes int64 `json:"compressedSizeBytes,omitempty"`
+
+	// Security fields
+
+	// AutoRebuildEnabled indicates if automatic CVE rebuilds are enabled for this image
+	// +optional
+	AutoRebuildEnabled bool `json:"autoRebuildEnabled,omitempty"`
 }
 
 // ImageCertificationInfoSpec defines the desired state of ImageCertificationInfo
@@ -160,7 +187,8 @@ type ImageCertificationInfoStatus struct {
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.registryType`
 // +kubebuilder:printcolumn:name="Certified",type=string,JSONPath=`.status.certificationStatus`
 // +kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.pyxisData.healthIndex`
-// +kubebuilder:printcolumn:name="Pods",type=integer,JSONPath=`.status.podReferences`,priority=1
+// +kubebuilder:printcolumn:name="Release",type=string,JSONPath=`.status.pyxisData.releaseCategory`,priority=1
+// +kubebuilder:printcolumn:name="EOL",type=date,JSONPath=`.status.pyxisData.eolDate`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ImageCertificationInfo is the Schema for the imagecertificationinfos API

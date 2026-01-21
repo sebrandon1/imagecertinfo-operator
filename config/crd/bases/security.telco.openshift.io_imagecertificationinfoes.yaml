@@ -27,10 +27,14 @@ spec:
     - jsonPath: .status.pyxisData.healthIndex
       name: Health
       type: string
-    - jsonPath: .status.podReferences
-      name: Pods
+    - jsonPath: .status.pyxisData.releaseCategory
+      name: Release
       priority: 1
-      type: integer
+      type: string
+    - jsonPath: .status.pyxisData.eolDate
+      name: EOL
+      priority: 1
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -198,9 +202,28 @@ spec:
                 description: PyxisData contains certification data from Red Hat Pyxis
                   API
                 properties:
+                  architectures:
+                    description: Architectures lists the supported CPU architectures
+                      (e.g., amd64, arm64, s390x, ppc64le)
+                    items:
+                      type: string
+                    type: array
+                  autoRebuildEnabled:
+                    description: AutoRebuildEnabled indicates if automatic CVE rebuilds
+                      are enabled for this image
+                    type: boolean
                   catalogURL:
                     description: CatalogURL is the link to the Red Hat container catalog
                       page
+                    type: string
+                  compressedSizeBytes:
+                    description: CompressedSizeBytes is the compressed image size
+                      in bytes
+                    format: int64
+                    type: integer
+                  eolDate:
+                    description: EOLDate is the end-of-life date for this image
+                    format: date-time
                     type: string
                   healthIndex:
                     description: HealthIndex is the image health grade (A-F)
@@ -215,6 +238,14 @@ spec:
                     type: string
                   publisher:
                     description: Publisher is the certified publisher name
+                    type: string
+                  releaseCategory:
+                    description: ReleaseCategory indicates the release status (e.g.,
+                      Generally Available, Deprecated, Tech Preview)
+                    type: string
+                  replacedBy:
+                    description: ReplacedBy is the repository name of the image that
+                      replaces this one (if deprecated)
                     type: string
                   vulnerabilities:
                     description: Vulnerabilities contains vulnerability counts by

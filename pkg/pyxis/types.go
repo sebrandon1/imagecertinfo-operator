@@ -34,6 +34,27 @@ type CertificationData struct {
 	PublishedAt string
 	// CVEs is a list of CVE identifiers affecting this image
 	CVEs []string
+
+	// Lifecycle fields
+
+	// EOLDate is the end-of-life date for this image (ISO 8601 format)
+	EOLDate string
+	// ReleaseCategory indicates the release status (e.g., Generally Available, Deprecated)
+	ReleaseCategory string
+	// ReplacedBy is the repository name of the image that replaces this one
+	ReplacedBy string
+
+	// Operational fields
+
+	// Architectures lists the supported CPU architectures
+	Architectures []string
+	// CompressedSizeBytes is the compressed image size in bytes
+	CompressedSizeBytes int64
+
+	// Security fields
+
+	// AutoRebuildEnabled indicates if automatic CVE rebuilds are enabled
+	AutoRebuildEnabled bool
 }
 
 // VulnerabilitySummary contains vulnerability counts by severity
@@ -52,6 +73,16 @@ type PyxisImageResponse struct {
 	FreshnessGrades      []PyxisFreshnessGrade      `json:"freshness_grades,omitempty"`
 	VulnerabilitySummary *PyxisVulnerabilitySummary `json:"vulnerability_summary,omitempty"`
 	Repositories         []PyxisImageRepository     `json:"repositories,omitempty"`
+
+	// Size information
+	TotalSizeBytes             int64 `json:"total_size_bytes,omitempty"`
+	TotalUncompressedSizeBytes int64 `json:"total_uncompressed_size_bytes,omitempty"`
+
+	// Architecture information from content_stream_grades
+	ContentStreamGrades []PyxisContentStreamGrade `json:"content_stream_grades,omitempty"`
+
+	// CVE rebuild setting
+	CanAutoReleaseCVERebuild bool `json:"can_auto_release_cve_rebuild,omitempty"`
 }
 
 // PyxisImageRepository represents repository info within an image response
@@ -91,6 +122,12 @@ type PyxisVulnerabilitySummary struct {
 	Low       int `json:"low"`
 }
 
+// PyxisContentStreamGrade contains architecture-specific freshness info
+type PyxisContentStreamGrade struct {
+	Architecture string `json:"architecture"`
+	Grade        string `json:"grade"`
+}
+
 // PyxisContainerRepository represents a container repository from Pyxis
 type PyxisContainerRepository struct {
 	ID              string `json:"_id"`
@@ -98,6 +135,11 @@ type PyxisContainerRepository struct {
 	Repository      string `json:"repository"`
 	Registry        string `json:"registry"`
 	IsPublished     bool   `json:"published"`
+
+	// Lifecycle fields
+	EOLDate                  string   `json:"eol_date,omitempty"`
+	ReleaseCategories        []string `json:"release_categories,omitempty"`
+	ReplacedByRepositoryName string   `json:"replaced_by_repository_name,omitempty"`
 }
 
 // PyxisVendor represents a vendor from Pyxis

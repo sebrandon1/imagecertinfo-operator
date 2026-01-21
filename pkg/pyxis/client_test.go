@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,7 +31,8 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 		registry       string
 		repository     string
 		digest         string
-		serverResponse interface{}
+		imageResponse  *PyxisImageResponse
+		repoResponse   *PyxisContainerRepository
 		serverStatus   int
 		wantErr        bool
 		wantNil        bool
@@ -41,11 +43,14 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 			registry:   "registry.redhat.io",
 			repository: "ubi8/ubi",
 			digest:     "sha256:abc123",
-			serverResponse: PyxisImageResponse{
+			imageResponse: &PyxisImageResponse{
 				ID:        "test-id",
 				Certified: true,
 				FreshnessGrades: []PyxisFreshnessGrade{
 					{Grade: "A"},
+				},
+				Repositories: []PyxisImageRepository{
+					{Registry: "registry.redhat.io", Repository: "ubi8/ubi"},
 				},
 				ParsedData: &PyxisImageParsedData{
 					Labels: []PyxisLabel{
@@ -59,6 +64,18 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 					Moderate:  5,
 					Low:       10,
 				},
+				TotalSizeBytes:           100000000,
+				CanAutoReleaseCVERebuild: true,
+				ContentStreamGrades: []PyxisContentStreamGrade{
+					{Architecture: "amd64", Grade: "A"},
+					{Architecture: "arm64", Grade: "A"},
+				},
+			},
+			repoResponse: &PyxisContainerRepository{
+				ID:                       "repo-123",
+				EOLDate:                  "2025-12-31",
+				ReleaseCategories:        []string{"Generally Available"},
+				ReplacedByRepositoryName: "",
 			},
 			serverStatus: http.StatusOK,
 			wantErr:      false,
@@ -95,9 +112,30 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Handle repository endpoint
+				if strings.Contains(r.URL.Path, "/repositories/registry/") {
+					if tt.repoResponse != nil {
+						w.WriteHeader(http.StatusOK)
+						_ = json.NewEncoder(w).Encode(tt.repoResponse)
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+					return
+				}
+				// Handle vulnerabilities endpoint
+				if strings.Contains(r.URL.Path, "/vulnerabilities") {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(PyxisVulnerabilitiesResponse{Data: []PyxisVulnerability{}})
+					return
+				}
+				// Handle images endpoint
 				w.WriteHeader(tt.serverStatus)
-				if tt.serverResponse != nil {
-					_ = json.NewEncoder(w).Encode(tt.serverResponse)
+				if tt.imageResponse != nil {
+					// Wrap in paged response
+					pagedResp := PyxisPagedResponse{
+						Data: []PyxisImageResponse{*tt.imageResponse},
+					}
+					_ = json.NewEncoder(w).Encode(pagedResp)
 				}
 			}))
 			defer server.Close()
@@ -125,6 +163,13 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 				}
 				if got.HealthIndex != tt.wantHealth {
 					t.Errorf("GetImageCertification() HealthIndex = %v, want %v", got.HealthIndex, tt.wantHealth)
+				}
+				// Verify new fields are populated
+				if got.CompressedSizeBytes == 0 && tt.imageResponse != nil && tt.imageResponse.TotalSizeBytes > 0 {
+					t.Error("GetImageCertification() CompressedSizeBytes not populated")
+				}
+				if len(got.Architectures) == 0 && tt.imageResponse != nil && len(tt.imageResponse.ContentStreamGrades) > 0 {
+					t.Error("GetImageCertification() Architectures not populated")
 				}
 			}
 		})
