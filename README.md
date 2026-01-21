@@ -1,135 +1,183 @@
-# imagecertinfo-operator
-// TODO(user): Add simple overview of use/purpose
+# ImageCertInfo Operator
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Automatically discover, inventory, and track container image certifications
+and security metadata across your Kubernetes cluster.
 
-## Getting Started
+## Overview
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+The ImageCertInfo Operator is a Kubernetes operator that watches all running
+containers in your cluster and creates a comprehensive, always-current inventory
+of container images. It enriches this inventory with Red Hat certification data,
+security vulnerabilities, and image lifecycle information from the Pyxis API.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+**Perfect for organizations that require certified container images or need to
+track which workloads are using vulnerable, uncertified, or end-of-life images.**
 
-```sh
-make docker-build docker-push IMG=<some-registry>/imagecertinfo-operator:tag
+## Key Features
+
+- **Automatic Discovery**: Watches pods cluster-wide and discovers all container images
+- **Red Hat Certification**: Queries Red Hat's Pyxis API for certification status
+- **Security Tracking**: Collects vulnerability counts (Critical/Important/Moderate/Low), CVE lists, and health grades (A-F)
+- **Workload Mapping**: Tracks which pods use each image across all namespaces
+- **Lifecycle Awareness**: Monitors EOL dates, release categories, and replacement images
+- **Multi-Architecture Support**: Tracks supported architectures (amd64, arm64, s390x, ppc64le)
+- **Zero Configuration**: Works without authentication for public Pyxis API access
+
+## How It Differs from Red Hat ACS
+
+| Capability | ImageCertInfo Operator | Red Hat ACS |
+|------------|------------------------|-------------|
+| **Primary Focus** | Image certification & inventory | Full security platform |
+| **Deployment Model** | Lightweight operator (~50MB) | Multi-component platform (Central, Scanner, Sensor) |
+| **Scope** | Image metadata & certification | Vulnerability scanning, policy enforcement, runtime protection |
+| **Red Hat Integration** | Deep Pyxis API integration for certification data | Broader security scanning with Scanner V4/ClairCore |
+| **Resource Usage** | Minimal (single pod) | Significant (multiple components, database) |
+| **Policy Enforcement** | Observational only (no blocking) | Active enforcement via admission control |
+| **Cost** | Free/Open Source | Commercial product |
+| **Use Case** | Compliance tracking, image inventory | Enterprise container security |
+
+**When to use ImageCertInfo Operator:**
+- You need lightweight image certification tracking
+- You want to audit Red Hat certified vs. non-certified images
+- You need a simple inventory of all images in your cluster
+- You want to track image lifecycle (EOL dates, deprecations)
+
+**When to use Red Hat ACS:**
+- You need comprehensive vulnerability scanning
+- You require policy enforcement and admission control
+- You need runtime threat detection
+- You want CI/CD pipeline integration for security gates
+
+## Quick Start
+
+### Deploy the Operator
+
+```bash
+# Using the pre-built image
+kubectl apply -f https://raw.githubusercontent.com/sebrandon1/imagecertinfo-operator/main/dist/install.yaml
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+### Or build and deploy from source
 
-**Install the CRDs into the cluster:**
+```bash
+# Build and push to your registry
+make docker-build docker-push IMG=quay.io/sebrandon1/imagecertinfo-operator:latest
 
-```sh
+# Install CRDs and deploy
 make install
+make deploy IMG=quay.io/sebrandon1/imagecertinfo-operator:latest
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+## Usage Examples
 
-```sh
-make deploy IMG=<some-registry>/imagecertinfo-operator:tag
+Once deployed, the operator automatically creates `ImageCertificationInfo` resources for each unique image in your cluster.
+
+### View All Tracked Images
+
+```bash
+kubectl get imagecertificationinfo
+
+# Example output:
+# NAME                                              REGISTRY              TYPE     CERTIFIED   HEALTH   AGE
+# registry.redhat.io.ubi9.ubi.a1b2c3d4              registry.redhat.io    RedHat   Certified   A        5m
+# quay.io.sebrandon1.imagecertinfo-operator.e5f6    quay.io               Partner  Unknown     -        5m
+# docker.io.library.nginx.7g8h9i0j                  docker.io             Community NotCertified -      5m
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+### View Detailed Image Information
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```bash
+kubectl describe imagecertificationinfo registry.redhat.io.ubi9.ubi.a1b2c3d4
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
+**Example output:**
+```yaml
+Name:         registry.redhat.io.ubi9.ubi.a1b2c3d4
+API Version:  security.telco.openshift.io/v1alpha1
+Kind:         ImageCertificationInfo
+Spec:
+  Full Image Reference:  registry.redhat.io/ubi9/ubi@sha256:a1b2c3d4...
+  Image Digest:          sha256:a1b2c3d4...
+  Registry:              registry.redhat.io
+  Repository:            ubi9/ubi
+Status:
+  Certification Status:  Certified
+  Registry Type:         RedHat
+  Pyxis Data:
+    Architectures:
+      - amd64
+      - arm64
+      - ppc64le
+      - s390x
+    Auto Rebuild Enabled:    true
+    Catalog URL:             https://catalog.redhat.com/software/containers/ubi9/ubi/...
+    Compressed Size Bytes:   82945123
+    Health Index:            A
+    Publisher:               Red Hat, Inc.
+    Release Category:        Generally Available
+    Vulnerabilities:
+      Critical:   0
+      Important:  2
+      Low:        15
+      Moderate:   5
+  Pod References:
+    - Container:  ubi-container
+      Name:       my-app-pod
+      Namespace:  default
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+### Find Images with Vulnerabilities
 
-```sh
-make uninstall
+```bash
+# Find images with critical vulnerabilities
+kubectl get imagecertificationinfo -o json | jq '.items[] | select(.status.pyxisData.vulnerabilities.critical > 0) | .metadata.name'
 ```
 
-**UnDeploy the controller from the cluster:**
+### Find Non-Certified Images
 
-```sh
-make undeploy
+```bash
+kubectl get imagecertificationinfo --field-selector=status.certificationStatus=NotCertified
 ```
 
-## Project Distribution
+### Check for Deprecated Images
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/imagecertinfo-operator:tag
+```bash
+kubectl get imagecertificationinfo -o wide | grep -i deprecated
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+## Container Image
 
-2. Using the installer
+The operator is available as a multi-architecture container image:
 
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/imagecertinfo-operator/<tag or branch>/dist/install.yaml
+```
+quay.io/sebrandon1/imagecertinfo-operator:latest
+quay.io/sebrandon1/imagecertinfo-operator:v0.1.0
 ```
 
-### By providing a Helm Chart
+**Supported architectures:** `amd64`, `arm64`, `s390x`, `ppc64le`
 
-1. Build the chart using the optional helm plugin
+## Prerequisites
 
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
+- Kubernetes v1.11.3+ or OpenShift 4.x
+- kubectl or oc CLI
+- Cluster-admin privileges (for CRD installation)
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+## Configuration
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+The operator can be configured via command-line flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--enable-pyxis` | Enable Red Hat Pyxis API integration | `true` |
+| `--pyxis-api-key` | Optional API key for higher rate limits | (none) |
+| `--metrics-bind-address` | Address for metrics endpoint | `:8080` |
+| `--health-probe-bind-address` | Address for health probes | `:8081` |
+| `--leader-elect` | Enable leader election for HA | `false` |
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache License 2.0 - See [LICENSE](LICENSE) for details.
