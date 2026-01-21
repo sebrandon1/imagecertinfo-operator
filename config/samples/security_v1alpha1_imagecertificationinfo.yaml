@@ -1,0 +1,9 @@
+apiVersion: security.telco.openshift.io/v1alpha1
+kind: ImageCertificationInfo
+metadata:
+  labels:
+    app.kubernetes.io/name: imagecertinfo-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: imagecertificationinfo-sample
+spec:
+  # TODO(user): Add fields here

@@ -1,0 +1,46 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/status
+  verbs:
+  - get
+- apiGroups:
+  - security.telco.openshift.io
+  resources:
+  - imagecertificationinfoes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - security.telco.openshift.io
+  resources:
+  - imagecertificationinfoes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - security.telco.openshift.io
+  resources:
+  - imagecertificationinfoes/status
+  verbs:
+  - get
+  - patch
+  - update

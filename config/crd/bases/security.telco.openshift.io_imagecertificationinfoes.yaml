@@ -1,0 +1,255 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: imagecertificationinfoes.security.telco.openshift.io
+spec:
+  group: security.telco.openshift.io
+  names:
+    kind: ImageCertificationInfo
+    listKind: ImageCertificationInfoList
+    plural: imagecertificationinfoes
+    singular: imagecertificationinfo
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.registry
+      name: Registry
+      type: string
+    - jsonPath: .status.registryType
+      name: Type
+      type: string
+    - jsonPath: .status.certificationStatus
+      name: Certified
+      type: string
+    - jsonPath: .status.pyxisData.healthIndex
+      name: Health
+      type: string
+    - jsonPath: .status.podReferences
+      name: Pods
+      priority: 1
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ImageCertificationInfo is the Schema for the imagecertificationinfos
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the desired state of ImageCertificationInfo
+            properties:
+              fullImageReference:
+                description: FullImageReference is the complete image reference including
+                  registry, repo, and digest
+                type: string
+              imageDigest:
+                description: ImageDigest is the sha256 digest of the image
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              registry:
+                description: Registry is the container registry hostname
+                type: string
+              repository:
+                description: Repository is the image repository path
+                type: string
+              tag:
+                description: Tag is the image tag if available
+                type: string
+            required:
+            - fullImageReference
+            - imageDigest
+            - registry
+            - repository
+            type: object
+          status:
+            description: Status defines the observed state of ImageCertificationInfo
+            properties:
+              certificationStatus:
+                default: Unknown
+                description: CertificationStatus indicates the certification status
+                  (Certified, NotCertified, Pending, Unknown, Error)
+                enum:
+                - Certified
+                - NotCertified
+                - Pending
+                - Unknown
+                - Error
+                type: string
+              conditions:
+                description: Conditions represent the current state of the ImageCertificationInfo
+                  resource
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              firstSeenAt:
+                description: FirstSeenAt is when this image was first observed in
+                  the cluster
+                format: date-time
+                type: string
+              lastPyxisCheckAt:
+                description: LastPyxisCheckAt is when the Pyxis API was last queried
+                  for this image
+                format: date-time
+                type: string
+              lastSeenAt:
+                description: LastSeenAt is when this image was last observed in a
+                  running pod
+                format: date-time
+                type: string
+              podReferences:
+                description: PodReferences lists all pods currently using this image
+                items:
+                  description: PodReference contains information about a pod using
+                    this image
+                  properties:
+                    container:
+                      description: Container name within the pod
+                      type: string
+                    name:
+                      description: Name of the pod
+                      type: string
+                    namespace:
+                      description: Namespace of the pod
+                      type: string
+                  required:
+                  - container
+                  - name
+                  - namespace
+                  type: object
+                type: array
+              pyxisData:
+                description: PyxisData contains certification data from Red Hat Pyxis
+                  API
+                properties:
+                  catalogURL:
+                    description: CatalogURL is the link to the Red Hat container catalog
+                      page
+                    type: string
+                  healthIndex:
+                    description: HealthIndex is the image health grade (A-F)
+                    type: string
+                  projectID:
+                    description: ProjectID is the Red Hat Connect project ID
+                    type: string
+                  publishedAt:
+                    description: PublishedAt is when the image was published to the
+                      registry
+                    format: date-time
+                    type: string
+                  publisher:
+                    description: Publisher is the certified publisher name
+                    type: string
+                  vulnerabilities:
+                    description: Vulnerabilities contains vulnerability counts by
+                      severity
+                    properties:
+                      critical:
+                        description: Critical vulnerability count
+                        type: integer
+                      important:
+                        description: Important vulnerability count
+                        type: integer
+                      low:
+                        description: Low vulnerability count
+                        type: integer
+                      moderate:
+                        description: Moderate vulnerability count
+                        type: integer
+                    type: object
+                type: object
+              registryType:
+                default: Unknown
+                description: RegistryType indicates the type of registry (RedHat,
+                  Partner, Community, Private, Unknown)
+                enum:
+                - RedHat
+                - Partner
+                - Community
+                - Private
+                - Unknown
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,17 @@
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Ignore build artifacts and non-essential files
+bin/
+testbin/
+*.out
+*.test
+.git/
+.github/
+.vscode/
+*.md
+Makefile
+LICENSE
+.gitignore
+hack/
+config/
+
+# Keep all Go source and module files
