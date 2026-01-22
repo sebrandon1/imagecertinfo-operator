@@ -27,16 +27,16 @@ import (
 
 func TestHTTPClient_GetImageCertification(t *testing.T) {
 	tests := []struct {
-		name           string
-		registry       string
-		repository     string
-		digest         string
-		imageResponse  *PyxisImageResponse
-		repoResponse   *PyxisContainerRepository
-		serverStatus   int
-		wantErr        bool
-		wantNil        bool
-		wantHealth     string
+		name          string
+		registry      string
+		repository    string
+		digest        string
+		imageResponse *PyxisImageResponse
+		repoResponse  *PyxisContainerRepository
+		serverStatus  int
+		wantErr       bool
+		wantNil       bool
+		wantHealth    string
 	}{
 		{
 			name:       "certified image found",
