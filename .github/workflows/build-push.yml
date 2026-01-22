@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: sebrandon1/imagecertinfo-operator
+  IMAGE_NAME: bapalm/imagecertinfo-operator
 
 jobs:
   test:

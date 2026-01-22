@@ -61,11 +61,11 @@ kubectl apply -f https://raw.githubusercontent.com/sebrandon1/imagecertinfo-oper
 
 ```bash
 # Build and push to your registry
-make docker-build docker-push IMG=quay.io/sebrandon1/imagecertinfo-operator:latest
+make docker-build docker-push IMG=quay.io/bapalm/imagecertinfo-operator:latest
 
 # Install CRDs and deploy
 make install
-make deploy IMG=quay.io/sebrandon1/imagecertinfo-operator:latest
+make deploy IMG=quay.io/bapalm/imagecertinfo-operator:latest
 ```
 
 ## Usage Examples
@@ -150,8 +150,9 @@ kubectl get imagecertificationinfo -o wide | grep -i deprecated
 The operator is available as a multi-architecture container image:
 
 ```
-quay.io/sebrandon1/imagecertinfo-operator:latest
-quay.io/sebrandon1/imagecertinfo-operator:v0.1.0
+quay.io/bapalm/imagecertinfo-operator:latest
+quay.io/bapalm/imagecertinfo-operator:stable
+quay.io/bapalm/imagecertinfo-operator:v0.1.0
 ```
 
 **Supported architectures:** `amd64`, `arm64`, `s390x`, `ppc64le`
