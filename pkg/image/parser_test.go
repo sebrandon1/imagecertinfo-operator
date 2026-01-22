@@ -40,25 +40,29 @@ func TestParseImageID(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "docker-pullable prefix with Red Hat registry",
-			imageID: "docker-pullable://registry.redhat.io/ubi8/ubi@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+			name: "docker-pullable prefix with Red Hat registry",
+			imageID: "docker-pullable://registry.redhat.io/ubi8/ubi@" +
+				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "registry.redhat.io",
-				Repository:    "ubi8/ubi",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-				FullReference: "registry.redhat.io/ubi8/ubi@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   "registry.redhat.io",
+				Repository: "ubi8/ubi",
+				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				FullReference: "registry.redhat.io/ubi8/ubi@" +
+					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
-			name:    "docker prefix",
-			imageID: "docker://quay.io/openshift/origin-cli@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+			name: "docker prefix",
+			imageID: "docker://quay.io/openshift/origin-cli@" +
+				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "quay.io",
-				Repository:    "openshift/origin-cli",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-				FullReference: "quay.io/openshift/origin-cli@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   "quay.io",
+				Repository: "openshift/origin-cli",
+				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				FullReference: "quay.io/openshift/origin-cli@" +
+					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
@@ -84,26 +88,30 @@ func TestParseImageID(t *testing.T) {
 			},
 		},
 		{
-			name:    "image with tag and digest",
-			imageID: "registry.redhat.io/ubi8/ubi:8.5@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+			name: "image with tag and digest",
+			imageID: "registry.redhat.io/ubi8/ubi:8.5@" +
+				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "registry.redhat.io",
-				Repository:    "ubi8/ubi",
-				Tag:           "8.5",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-				FullReference: "registry.redhat.io/ubi8/ubi:8.5@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   "registry.redhat.io",
+				Repository: "ubi8/ubi",
+				Tag:        "8.5",
+				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				FullReference: "registry.redhat.io/ubi8/ubi:8.5@" +
+					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
-			name:    "ghcr.io image",
-			imageID: "ghcr.io/kubernetes-sigs/controller-runtime@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+			name: "ghcr.io image",
+			imageID: "ghcr.io/kubernetes-sigs/controller-runtime@" +
+				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "ghcr.io",
-				Repository:    "kubernetes-sigs/controller-runtime",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-				FullReference: "ghcr.io/kubernetes-sigs/controller-runtime@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   "ghcr.io",
+				Repository: "kubernetes-sigs/controller-runtime",
+				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				FullReference: "ghcr.io/kubernetes-sigs/controller-runtime@" +
+					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
@@ -118,14 +126,16 @@ func TestParseImageID(t *testing.T) {
 			},
 		},
 		{
-			name:    "gcr.io image",
-			imageID: "gcr.io/google-containers/pause@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+			name: "gcr.io image",
+			imageID: "gcr.io/google-containers/pause@" +
+				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "gcr.io",
-				Repository:    "google-containers/pause",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-				FullReference: "gcr.io/google-containers/pause@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   "gcr.io",
+				Repository: "google-containers/pause",
+				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				FullReference: "gcr.io/google-containers/pause@" +
+					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 	}

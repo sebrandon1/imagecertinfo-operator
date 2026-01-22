@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 )
 
@@ -102,8 +103,11 @@ func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 }
 
 // GetImageCertification retrieves certification data for an image from Pyxis.
-// It tries two API endpoints: first by image_id (single-arch), then by manifest_list_digest (multi-arch).
-func (c *HTTPClient) GetImageCertification(ctx context.Context, registry, repository, digest string) (*CertificationData, error) {
+// It tries two API endpoints: first by image_id (single-arch),
+// then by manifest_list_digest (multi-arch).
+func (c *HTTPClient) GetImageCertification(
+	ctx context.Context, registry, repository, digest string,
+) (*CertificationData, error) {
 	// Try first by image_id (single architecture images)
 	certData, err := c.queryByImageID(ctx, digest)
 	if err != nil {
@@ -137,6 +141,26 @@ func (c *HTTPClient) queryByManifestListDigest(ctx context.Context, digest strin
 
 // queryAndParse executes the request and parses the response
 func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*CertificationData, error) {
+	pyxisResp, err := c.fetchAndParseResponse(ctx, requestURL)
+	if err != nil || pyxisResp == nil {
+		return nil, err
+	}
+
+	// Check if this is from a Red Hat registry
+	if !c.isFromRedHatRegistry(pyxisResp) {
+		return nil, nil
+	}
+
+	// Convert to CertificationData
+	certData := c.convertToCertificationData(ctx, pyxisResp)
+
+	return certData, nil
+}
+
+// fetchAndParseResponse fetches and parses the Pyxis API response
+func (c *HTTPClient) fetchAndParseResponse(
+	ctx context.Context, requestURL string,
+) (*PyxisImageResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -152,14 +176,13 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle response status codes
 	switch resp.StatusCode {
 	case http.StatusOK:
 		// Continue processing
 	case http.StatusNotFound:
-		// Image not found in Pyxis - not certified
 		return nil, nil
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, fmt.Errorf("authentication failed: %s", resp.Status)
@@ -168,124 +191,138 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, string(body))
 	}
 
-	// Parse response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Parse as paginated response
 	var pagedResp PyxisPagedResponse
 	if err := json.Unmarshal(body, &pagedResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// No data returned
 	if len(pagedResp.Data) == 0 {
 		return nil, nil
 	}
 
-	// Use the first matching image
-	pyxisResp := pagedResp.Data[0]
+	return &pagedResp.Data[0], nil
+}
 
-	// Check if this is from a Red Hat registry
-	isRedHatImage := false
+// isFromRedHatRegistry checks if the image is from a Red Hat registry
+func (c *HTTPClient) isFromRedHatRegistry(pyxisResp *PyxisImageResponse) bool {
+	if len(pyxisResp.Repositories) == 0 {
+		return true // No repos, assume valid
+	}
 	for _, repo := range pyxisResp.Repositories {
 		if isRedHatRegistry(repo.Registry) {
-			isRedHatImage = true
-			break
+			return true
 		}
 	}
-	if !isRedHatImage && len(pyxisResp.Repositories) > 0 {
-		// Image exists but not from a Red Hat registry we recognize
-		return nil, nil
-	}
+	return false
+}
 
-	// Convert to CertificationData
+// convertToCertificationData converts a Pyxis response to CertificationData
+func (c *HTTPClient) convertToCertificationData(
+	ctx context.Context, pyxisResp *PyxisImageResponse,
+) *CertificationData {
 	certData := &CertificationData{
-		ImageID: pyxisResp.ID,
+		ImageID:            pyxisResp.ID,
+		AutoRebuildEnabled: pyxisResp.CanAutoReleaseCVERebuild,
 	}
 
-	// Extract size information
 	if pyxisResp.TotalSizeBytes > 0 {
 		certData.CompressedSizeBytes = pyxisResp.TotalSizeBytes
 	}
 
-	// Extract auto-rebuild setting
-	certData.AutoRebuildEnabled = pyxisResp.CanAutoReleaseCVERebuild
+	certData.Architectures = extractArchitectures(pyxisResp.ContentStreamGrades)
+	c.populateRepositoryData(ctx, pyxisResp, certData)
 
-	// Extract architectures from content_stream_grades
-	archSet := make(map[string]bool)
-	for _, grade := range pyxisResp.ContentStreamGrades {
-		if grade.Architecture != "" {
-			archSet[grade.Architecture] = true
-		}
-	}
-	for arch := range archSet {
-		certData.Architectures = append(certData.Architectures, arch)
-	}
-
-	// Extract repository info including catalog URL, push date, and lifecycle data
-	// Format: https://catalog.redhat.com/software/containers/{repository_id}
-	if len(pyxisResp.Repositories) > 0 {
-		repo := pyxisResp.Repositories[0]
-		// Query the repository endpoint to get full repository info
-		repoInfo := c.getRepositoryInfo(ctx, repo.Registry, repo.Repository)
-		if repoInfo != nil {
-			if repoInfo.ID != "" {
-				certData.CatalogURL = fmt.Sprintf("https://catalog.redhat.com/software/containers/%s", repoInfo.ID)
-			}
-			// Extract lifecycle fields
-			certData.EOLDate = repoInfo.EOLDate
-			certData.ReleaseCategory = repoInfo.ReleaseCategory
-			certData.ReplacedBy = repoInfo.ReplacedByRepositoryName
-		}
-		// Extract push date (when image was published)
-		if repo.PushDate != "" {
-			certData.PublishedAt = repo.PushDate
-		}
-	}
-
-	// Get health index from freshness grades
 	if len(pyxisResp.FreshnessGrades) > 0 {
 		certData.HealthIndex = pyxisResp.FreshnessGrades[0].Grade
 	}
 
-	// Extract publisher from labels
-	if pyxisResp.ParsedData != nil {
-		for _, label := range pyxisResp.ParsedData.Labels {
-			switch label.Name {
-			case "vendor", "maintainer":
-				if certData.Publisher == "" {
-					certData.Publisher = label.Value
-				}
-			case "com.redhat.component":
-				if certData.ProjectID == "" {
-					certData.ProjectID = label.Value
-				}
-			}
-		}
-	}
+	extractPublisherInfo(pyxisResp.ParsedData, certData)
+	copyVulnerabilitySummary(pyxisResp.VulnerabilitySummary, certData)
 
-	// Copy vulnerability summary
-	if pyxisResp.VulnerabilitySummary != nil {
-		certData.Vulnerabilities = &VulnerabilitySummary{
-			Critical:  pyxisResp.VulnerabilitySummary.Critical,
-			Important: pyxisResp.VulnerabilitySummary.Important,
-			Moderate:  pyxisResp.VulnerabilitySummary.Moderate,
-			Low:       pyxisResp.VulnerabilitySummary.Low,
-		}
-	}
-
-	// Fetch CVE details if image has vulnerabilities
 	if certData.ImageID != "" {
-		cves := c.getVulnerabilities(ctx, certData.ImageID)
-		if len(cves) > 0 {
+		if cves := c.getVulnerabilities(ctx, certData.ImageID); len(cves) > 0 {
 			certData.CVEs = cves
 		}
 	}
 
-	return certData, nil
+	return certData
+}
+
+// extractArchitectures extracts unique architectures from content stream grades
+func extractArchitectures(grades []PyxisContentStreamGrade) []string {
+	archSet := make(map[string]bool)
+	for _, grade := range grades {
+		if grade.Architecture != "" {
+			archSet[grade.Architecture] = true
+		}
+	}
+	archs := make([]string, 0, len(archSet))
+	for arch := range archSet {
+		archs = append(archs, arch)
+	}
+	return archs
+}
+
+// populateRepositoryData populates repository-related fields in CertificationData
+func (c *HTTPClient) populateRepositoryData(
+	ctx context.Context, pyxisResp *PyxisImageResponse, certData *CertificationData,
+) {
+	if len(pyxisResp.Repositories) == 0 {
+		return
+	}
+
+	repo := pyxisResp.Repositories[0]
+	repoInfo := c.getRepositoryInfo(ctx, repo.Registry, repo.Repository)
+	if repoInfo != nil {
+		if repoInfo.ID != "" {
+			certData.CatalogURL = fmt.Sprintf(
+				"https://catalog.redhat.com/software/containers/%s", repoInfo.ID)
+		}
+		certData.EOLDate = repoInfo.EOLDate
+		certData.ReleaseCategory = repoInfo.ReleaseCategory
+		certData.ReplacedBy = repoInfo.ReplacedByRepositoryName
+	}
+
+	if repo.PushDate != "" {
+		certData.PublishedAt = repo.PushDate
+	}
+}
+
+// extractPublisherInfo extracts publisher and project ID from parsed data labels
+func extractPublisherInfo(parsedData *PyxisImageParsedData, certData *CertificationData) {
+	if parsedData == nil {
+		return
+	}
+	for _, label := range parsedData.Labels {
+		switch label.Name {
+		case "vendor", "maintainer":
+			if certData.Publisher == "" {
+				certData.Publisher = label.Value
+			}
+		case "com.redhat.component":
+			if certData.ProjectID == "" {
+				certData.ProjectID = label.Value
+			}
+		}
+	}
+}
+
+// copyVulnerabilitySummary copies vulnerability summary to CertificationData
+func copyVulnerabilitySummary(summary *PyxisVulnerabilitySummary, certData *CertificationData) {
+	if summary == nil {
+		return
+	}
+	certData.Vulnerabilities = &VulnerabilitySummary{
+		Critical:  summary.Critical,
+		Important: summary.Important,
+		Moderate:  summary.Moderate,
+		Low:       summary.Low,
+	}
 }
 
 // RepositoryInfo contains repository-level information from Pyxis
@@ -315,7 +352,7 @@ func (c *HTTPClient) getRepositoryInfo(ctx context.Context, registry, repository
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil
@@ -363,7 +400,7 @@ func (c *HTTPClient) getVulnerabilities(ctx context.Context, imageID string) []s
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil
@@ -397,12 +434,7 @@ func isRedHatRegistry(registry string) bool {
 		"registry.access.redhat.com",
 		"registry.connect.redhat.com",
 	}
-	for _, rhr := range redHatRegistries {
-		if registry == rhr {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(redHatRegistries, registry)
 }
 
 // IsHealthy checks if the Pyxis API is accessible
@@ -416,7 +448,7 @@ func (c *HTTPClient) IsHealthy(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	return resp.StatusCode == http.StatusOK
 }

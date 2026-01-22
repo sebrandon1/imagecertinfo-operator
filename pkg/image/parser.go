@@ -18,6 +18,7 @@ package image
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -108,8 +109,8 @@ func ReferenceToCRName(ref *Reference) string {
 
 	// Extract short digest (first 8 chars after sha256:)
 	shortDigest := ref.Digest
-	if strings.HasPrefix(shortDigest, "sha256:") {
-		shortDigest = strings.TrimPrefix(shortDigest, "sha256:")
+	if trimmed, ok := strings.CutPrefix(shortDigest, "sha256:"); ok {
+		shortDigest = trimmed
 		if len(shortDigest) > 8 {
 			shortDigest = shortDigest[:8]
 		}
@@ -165,8 +166,8 @@ func DigestToCRName(digest string) string {
 // Note: This only works with old-style sha256-based names
 func CRNameToDigest(crName string) string {
 	// Replace the first - with : (sha256-abc... -> sha256:abc...)
-	if strings.HasPrefix(crName, "sha256-") {
-		return "sha256:" + strings.TrimPrefix(crName, "sha256-")
+	if suffix, ok := strings.CutPrefix(crName, "sha256-"); ok {
+		return "sha256:" + suffix
 	}
 	return crName
 }
@@ -181,10 +182,8 @@ func ClassifyRegistry(registry string) securityv1alpha1.RegistryType {
 		"registry.access.redhat.com",
 		"registry.connect.redhat.com",
 	}
-	for _, rh := range redHatRegistries {
-		if registry == rh {
-			return securityv1alpha1.RegistryTypeRedHat
-		}
+	if slices.Contains(redHatRegistries, registry) {
+		return securityv1alpha1.RegistryTypeRedHat
 	}
 
 	// Partner registry (Quay.io)
@@ -200,10 +199,8 @@ func ClassifyRegistry(registry string) securityv1alpha1.RegistryType {
 		"registry.k8s.io",
 		"k8s.gcr.io",
 	}
-	for _, cr := range communityRegistries {
-		if registry == cr {
-			return securityv1alpha1.RegistryTypeCommunity
-		}
+	if slices.Contains(communityRegistries, registry) {
+		return securityv1alpha1.RegistryTypeCommunity
 	}
 
 	// Private registries (local/internal)

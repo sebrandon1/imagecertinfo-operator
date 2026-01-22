@@ -34,6 +34,14 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
 
+const (
+	testDigest    = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+	testCRName    = "registry.redhat.io.ubi8.ubi.abc123de"
+	testNamespace = "default"
+	testPodName   = "test-pod"
+	testContainer = "test-container"
+)
+
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -46,16 +54,15 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	scheme := newTestScheme()
 
 	// Create a test pod with container status
-	testDigest := "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
 	testPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-pod",
-			Namespace: "default",
+			Name:      testPodName,
+			Namespace: testNamespace,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name:  "test-container",
+					Name:  testContainer,
 					Image: "registry.redhat.io/ubi8/ubi:latest",
 				},
 			},
@@ -64,7 +71,7 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
-					Name:    "test-container",
+					Name:    testContainer,
 					ImageID: "docker-pullable://registry.redhat.io/ubi8/ubi@" + testDigest,
 				},
 			},
@@ -85,8 +92,8 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	// Reconcile the pod
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "test-pod",
-			Namespace: "default",
+			Name:      testPodName,
+			Namespace: testNamespace,
 		},
 	}
 
@@ -94,15 +101,14 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.Requeue {
-		t.Error("Reconcile() returned Requeue = true, want false")
+	if result.RequeueAfter != 0 {
+		t.Error("Reconcile() returned RequeueAfter != 0, want 0")
 	}
 
 	// Verify ImageCertificationInfo was created
 	// Expected name format: registry.redhat.io.ubi8.ubi.abc123de (first 8 chars of digest)
-	expectedCRName := "registry.redhat.io.ubi8.ubi.abc123de"
 	var cr securityv1alpha1.ImageCertificationInfo
-	if err := fakeClient.Get(ctx, client.ObjectKey{Name: expectedCRName}, &cr); err != nil {
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &cr); err != nil {
 		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
 	}
 
@@ -124,14 +130,14 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	if len(cr.Status.PodReferences) != 1 {
 		t.Fatalf("PodReferences count = %v, want 1", len(cr.Status.PodReferences))
 	}
-	if cr.Status.PodReferences[0].Name != "test-pod" {
-		t.Errorf("PodReference.Name = %v, want test-pod", cr.Status.PodReferences[0].Name)
+	if cr.Status.PodReferences[0].Name != testPodName {
+		t.Errorf("PodReference.Name = %v, want %s", cr.Status.PodReferences[0].Name, testPodName)
 	}
-	if cr.Status.PodReferences[0].Namespace != "default" {
-		t.Errorf("PodReference.Namespace = %v, want default", cr.Status.PodReferences[0].Namespace)
+	if cr.Status.PodReferences[0].Namespace != testNamespace {
+		t.Errorf("PodReference.Namespace = %v, want %s", cr.Status.PodReferences[0].Namespace, testNamespace)
 	}
-	if cr.Status.PodReferences[0].Container != "test-container" {
-		t.Errorf("PodReference.Container = %v, want test-container", cr.Status.PodReferences[0].Container)
+	if cr.Status.PodReferences[0].Container != testContainer {
+		t.Errorf("PodReference.Container = %v, want %s", cr.Status.PodReferences[0].Container, testContainer)
 	}
 }
 
@@ -139,15 +145,11 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	testDigest := "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
-	// Use the new human-readable CR name format
-	crName := "registry.redhat.io.ubi8.ubi.abc123de"
-
 	// Create existing ImageCertificationInfo
 	now := metav1.Now()
 	existingCR := &securityv1alpha1.ImageCertificationInfo{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: crName,
+			Name: testCRName,
 		},
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
@@ -160,7 +162,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
 			PodReferences: []securityv1alpha1.PodReference{
 				{
-					Namespace: "default",
+					Namespace: testNamespace,
 					Name:      "existing-pod",
 					Container: "existing-container",
 				},
@@ -171,10 +173,10 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	}
 
 	// Create a new pod that uses the same image
-	testPod := &corev1.Pod{
+	newPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "new-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -197,7 +199,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingCR, testPod).
+		WithObjects(existingCR, newPod).
 		WithStatusSubresource(existingCR).
 		Build()
 
@@ -210,7 +212,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      "new-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 	}
 
@@ -218,13 +220,13 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.Requeue {
-		t.Error("Reconcile() returned Requeue = true, want false")
+	if result.RequeueAfter != 0 {
+		t.Error("Reconcile() returned RequeueAfter != 0, want 0")
 	}
 
 	// Verify ImageCertificationInfo was updated with new pod reference
 	var cr securityv1alpha1.ImageCertificationInfo
-	if err := fakeClient.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &cr); err != nil {
 		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
 	}
 
@@ -251,7 +253,7 @@ func TestPodReconciler_Reconcile_DeletedPod(t *testing.T) {
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      "deleted-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 	}
 
@@ -259,8 +261,8 @@ func TestPodReconciler_Reconcile_DeletedPod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.Requeue {
-		t.Error("Reconcile() returned Requeue = true, want false")
+	if result.RequeueAfter != 0 {
+		t.Error("Reconcile() returned RequeueAfter != 0, want 0")
 	}
 }
 
@@ -269,10 +271,10 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 	scheme := newTestScheme()
 
 	// Create a pod that is not running
-	testPod := &corev1.Pod{
+	completedPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "completed-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodSucceeded,
@@ -281,7 +283,7 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(testPod).
+		WithObjects(completedPod).
 		Build()
 
 	reconciler := &PodReconciler{
@@ -292,7 +294,7 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      "completed-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 	}
 
@@ -300,8 +302,8 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.Requeue {
-		t.Error("Reconcile() returned Requeue = true, want false")
+	if result.RequeueAfter != 0 {
+		t.Error("Reconcile() returned RequeueAfter != 0, want 0")
 	}
 
 	// Verify no ImageCertificationInfo was created
@@ -339,15 +341,11 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	testDigest := "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
-	// Use the new human-readable CR name format
-	crName := "registry.redhat.io.ubi8.ubi.abc123de"
-
 	// Create existing pod
 	existingPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-pod",
-			Namespace: "default",
+			Namespace: testNamespace,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -358,7 +356,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	now := metav1.Now()
 	existingCR := &securityv1alpha1.ImageCertificationInfo{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: crName,
+			Name: testCRName,
 		},
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
@@ -371,12 +369,12 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
 			PodReferences: []securityv1alpha1.PodReference{
 				{
-					Namespace: "default",
+					Namespace: testNamespace,
 					Name:      "existing-pod",
 					Container: "container1",
 				},
 				{
-					Namespace: "default",
+					Namespace: testNamespace,
 					Name:      "deleted-pod",
 					Container: "container2",
 				},
@@ -404,7 +402,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 
 	// Verify stale reference was removed
 	var cr securityv1alpha1.ImageCertificationInfo
-	if err := fakeClient.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &cr); err != nil {
 		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
 	}
 
