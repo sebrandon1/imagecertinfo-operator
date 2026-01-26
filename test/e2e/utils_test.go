@@ -78,10 +78,10 @@ func GetCertifiedTestImage() string {
 	switch clusterType {
 	case ClusterTypeOpenShift:
 		// On OpenShift, we can use internal registry images
-		return "registry.redhat.io/ubi9/ubi-minimal:latest"
+		return "registry.access.redhat.com/ubi9/ubi-minimal:latest"
 	default:
 		// On Kubernetes, use publicly accessible certified image
-		return "registry.redhat.io/ubi9/ubi-minimal:latest"
+		return "registry.access.redhat.com/ubi9/ubi-minimal:latest"
 	}
 }
 

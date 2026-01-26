@@ -35,8 +35,8 @@ import (
 // testNamespace is where test pods are deployed
 const testNamespace = "certification-test"
 
-// certifiedImage is a known Red Hat certified image
-const certifiedImage = "registry.redhat.io/ubi9/ubi-minimal:latest"
+// certifiedImage is a known Red Hat certified image (using public registry that doesn't require auth)
+const certifiedImage = "registry.access.redhat.com/ubi9/ubi-minimal:latest"
 
 // nonCertifiedImage is a public image that is not Red Hat certified
 const nonCertifiedImage = "docker.io/library/nginx:alpine"
@@ -162,13 +162,13 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 				// Find the ICI for the Red Hat registry
 				var found bool
 				for _, ici := range iciList.Items {
-					if strings.Contains(ici.Spec.Registry, "registry.redhat.io") {
+					if strings.Contains(ici.Spec.Registry, "registry.access.redhat.com") {
 						found = true
 						g.Expect(ici.Status.CertificationStatus).To(Equal("Certified"),
 							"Expected Certified status for Red Hat image")
 					}
 				}
-				g.Expect(found).To(BeTrue(), "ImageCertificationInfo for registry.redhat.io not found")
+				g.Expect(found).To(BeTrue(), "ImageCertificationInfo for registry.access.redhat.com not found")
 			}).Should(Succeed())
 		})
 
@@ -197,7 +197,7 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 				g.Expect(err).NotTo(HaveOccurred())
 
 				for _, ici := range iciList.Items {
-					if strings.Contains(ici.Spec.Registry, "registry.redhat.io") {
+					if strings.Contains(ici.Spec.Registry, "registry.access.redhat.com") {
 						g.Expect(ici.Status.PyxisData).NotTo(BeNil(), "PyxisData should be populated")
 						g.Expect(ici.Status.PyxisData.HealthIndex).NotTo(BeEmpty(),
 							"HealthIndex should be set")
@@ -231,7 +231,7 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 				g.Expect(err).NotTo(HaveOccurred())
 
 				for _, ici := range iciList.Items {
-					if strings.Contains(ici.Spec.Registry, "registry.redhat.io") {
+					if strings.Contains(ici.Spec.Registry, "registry.access.redhat.com") {
 						var foundPod bool
 						for _, ref := range ici.Status.PodReferences {
 							if ref.Namespace == testNamespace && ref.Name == podName {
