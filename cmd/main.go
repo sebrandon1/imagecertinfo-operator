@@ -70,6 +70,9 @@ func main() {
 	var pyxisBaseURL string
 	var pyxisAPIKey string
 	var cleanupInterval time.Duration
+	var pyxisCacheTTL time.Duration
+	var pyxisRateLimit float64
+	var pyxisRateBurst int
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -98,6 +101,12 @@ func main() {
 		"Optional API key for Pyxis authentication (public API works without auth, can also use PYXIS_API_KEY env var)")
 	flag.DurationVar(&cleanupInterval, "cleanup-interval", 5*time.Minute,
 		"Interval for cleaning up stale pod references")
+	flag.DurationVar(&pyxisCacheTTL, "pyxis-cache-ttl", pyxis.DefaultCacheTTL,
+		"TTL for cached Pyxis API responses (default 1 hour)")
+	flag.Float64Var(&pyxisRateLimit, "pyxis-rate-limit", pyxis.DefaultRateLimit,
+		"Rate limit for Pyxis API requests per second (default 10)")
+	flag.IntVar(&pyxisRateBurst, "pyxis-rate-burst", pyxis.DefaultRateBurst,
+		"Burst size for Pyxis API rate limiting (default 20)")
 
 	opts := zap.Options{
 		Development: true,
@@ -207,7 +216,11 @@ func main() {
 	// The public Pyxis API works without authentication for read-only queries
 	var pyxisClient pyxis.Client
 	if pyxisEnabled {
-		setupLog.Info("Pyxis integration enabled (no auth required for public API)", "baseURL", pyxisBaseURL)
+		setupLog.Info("Pyxis integration enabled (no auth required for public API)",
+			"baseURL", pyxisBaseURL,
+			"cacheTTL", pyxisCacheTTL,
+			"rateLimit", pyxisRateLimit,
+			"rateBurst", pyxisRateBurst)
 		clientOpts := []pyxis.ClientOption{
 			pyxis.WithBaseURL(pyxisBaseURL),
 		}
@@ -215,7 +228,10 @@ func main() {
 			setupLog.Info("Using API key for Pyxis authentication")
 			clientOpts = append(clientOpts, pyxis.WithAPIKey(pyxisAPIKey))
 		}
-		pyxisClient = pyxis.NewHTTPClient(clientOpts...)
+		baseClient := pyxis.NewHTTPClient(clientOpts...)
+
+		// Wrap with caching and rate limiting
+		pyxisClient = pyxis.NewCachedRateLimitedClient(baseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst)
 	}
 
 	// Set up the Pod controller
@@ -223,6 +239,7 @@ func main() {
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		PyxisClient: pyxisClient,
+		Recorder:    mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
 	}
 
 	if err = podReconciler.SetupWithManager(mgr); err != nil {
@@ -233,6 +250,11 @@ func main() {
 	// Start the cleanup loop for stale pod references
 	ctx := ctrl.SetupSignalHandler()
 	podReconciler.StartCleanupLoop(ctx, cleanupInterval)
+
+	// Start cache cleanup loop if using cached client
+	if cachedClient, ok := pyxisClient.(*pyxis.CachedClient); ok {
+		cachedClient.StartCleanupLoop(ctx, pyxisCacheTTL/2)
+	}
 
 	// +kubebuilder:scaffold:builder
 

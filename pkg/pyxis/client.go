@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"slices"
 	"time"
+
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 )
 
 const (
@@ -141,10 +143,21 @@ func (c *HTTPClient) queryByManifestListDigest(ctx context.Context, digest strin
 
 // queryAndParse executes the request and parses the response
 func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*CertificationData, error) {
+	start := time.Now()
 	pyxisResp, err := c.fetchAndParseResponse(ctx, requestURL)
-	if err != nil || pyxisResp == nil {
+	duration := time.Since(start).Seconds()
+
+	// Record metrics
+	endpoint := "images"
+	if err != nil {
+		metrics.RecordPyxisRequest("error", endpoint, duration)
 		return nil, err
 	}
+	if pyxisResp == nil {
+		metrics.RecordPyxisRequest("not_found", endpoint, duration)
+		return nil, nil
+	}
+	metrics.RecordPyxisRequest("success", endpoint, duration)
 
 	// Check if this is from a Red Hat registry
 	if !c.isFromRedHatRegistry(pyxisResp) {
@@ -234,7 +247,19 @@ func (c *HTTPClient) convertToCertificationData(
 		certData.CompressedSizeBytes = pyxisResp.TotalSizeBytes
 	}
 
+	// Enhanced fields for v0.2.0
+	if pyxisResp.TotalUncompressedSizeBytes > 0 {
+		certData.UncompressedSizeBytes = pyxisResp.TotalUncompressedSizeBytes
+	}
+	if pyxisResp.LayerCount > 0 {
+		certData.LayerCount = pyxisResp.LayerCount
+	}
+	if pyxisResp.BuildDate != "" {
+		certData.BuildDate = pyxisResp.BuildDate
+	}
+
 	certData.Architectures = extractArchitectures(pyxisResp.ContentStreamGrades)
+	certData.ArchitectureHealth = extractArchitectureHealth(pyxisResp.ContentStreamGrades)
 	c.populateRepositoryData(ctx, pyxisResp, certData)
 
 	if len(pyxisResp.FreshnessGrades) > 0 {
@@ -245,8 +270,12 @@ func (c *HTTPClient) convertToCertificationData(
 	copyVulnerabilitySummary(pyxisResp.VulnerabilitySummary, certData)
 
 	if certData.ImageID != "" {
-		if cves := c.getVulnerabilities(ctx, certData.ImageID); len(cves) > 0 {
+		cves, advisoryIDs := c.getVulnerabilitiesWithAdvisories(ctx, certData.ImageID)
+		if len(cves) > 0 {
 			certData.CVEs = cves
+		}
+		if len(advisoryIDs) > 0 {
+			certData.AdvisoryIDs = advisoryIDs
 		}
 	}
 
@@ -266,6 +295,20 @@ func extractArchitectures(grades []PyxisContentStreamGrade) []string {
 		archs = append(archs, arch)
 	}
 	return archs
+}
+
+// extractArchitectureHealth extracts architecture to health grade mapping
+func extractArchitectureHealth(grades []PyxisContentStreamGrade) map[string]string {
+	archHealth := make(map[string]string)
+	for _, grade := range grades {
+		if grade.Architecture != "" && grade.Grade != "" {
+			archHealth[grade.Architecture] = grade.Grade
+		}
+	}
+	if len(archHealth) == 0 {
+		return nil
+	}
+	return archHealth
 }
 
 // populateRepositoryData populates repository-related fields in CertificationData
@@ -382,13 +425,14 @@ func (c *HTTPClient) getRepositoryInfo(ctx context.Context, registry, repository
 	return info
 }
 
-// getVulnerabilities fetches CVE IDs for an image from the Pyxis vulnerabilities endpoint
-func (c *HTTPClient) getVulnerabilities(ctx context.Context, imageID string) []string {
+// getVulnerabilitiesWithAdvisories fetches CVE IDs and advisory IDs for an image from Pyxis
+func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, imageID string) ([]string, []string) {
+	start := time.Now()
 	requestURL := fmt.Sprintf("%s/images/id/%s/vulnerabilities", c.baseURL, imageID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -397,34 +441,48 @@ func (c *HTTPClient) getVulnerabilities(ctx context.Context, imageID string) []s
 	}
 
 	resp, err := c.httpClient.Do(req)
+	duration := time.Since(start).Seconds()
 	if err != nil {
-		return nil
+		metrics.RecordPyxisRequest("error", "vulnerabilities", duration)
+		return nil, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		metrics.RecordPyxisRequest("error", "vulnerabilities", duration)
+		return nil, nil
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	var vulnResp PyxisVulnerabilitiesResponse
 	if err := json.Unmarshal(body, &vulnResp); err != nil {
-		return nil
+		return nil, nil
 	}
 
-	// Extract CVE IDs, prioritizing critical and important first
+	metrics.RecordPyxisRequest("success", "vulnerabilities", duration)
+
+	// Extract CVE IDs and advisory IDs
 	var cves []string
+	advisorySet := make(map[string]bool)
 	for _, vuln := range vulnResp.Data {
 		if vuln.CVEID != "" {
 			cves = append(cves, vuln.CVEID)
 		}
+		if vuln.AdvisoryID != "" {
+			advisorySet[vuln.AdvisoryID] = true
+		}
 	}
 
-	return cves
+	advisoryIDs := make([]string, 0, len(advisorySet))
+	for id := range advisorySet {
+		advisoryIDs = append(advisoryIDs, id)
+	}
+
+	return cves, advisoryIDs
 }
 
 // isRedHatRegistry checks if the registry is a Red Hat registry
