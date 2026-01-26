@@ -1,0 +1,106 @@
+name: Nightly E2E Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+  workflow_dispatch:      # Manual trigger
+
+jobs:
+  e2e-kubernetes:
+    name: E2E Tests on Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Create Kubernetes cluster
+        uses: palmsoftware/quick-k8s@v0.0.39
+        with:
+          numControlPlaneNodes: 1
+          numWorkerNodes: 1
+
+      - name: Build operator image
+        run: |
+          make docker-build IMG=localhost:5000/imagecertinfo-operator:test
+
+      - name: Push to local registry
+        run: |
+          docker push localhost:5000/imagecertinfo-operator:test
+
+      - name: Deploy operator
+        run: |
+          make deploy IMG=localhost:5000/imagecertinfo-operator:test
+
+      - name: Wait for operator readiness
+        run: |
+          kubectl wait --for=condition=available --timeout=120s deployment/imagecertinfo-operator-controller-manager -n imagecertinfo-operator-system
+
+      - name: Run nightly e2e tests
+        run: |
+          make test-e2e-nightly CLUSTER_TYPE=kubernetes
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Controller Manager Logs ==="
+          kubectl logs -n imagecertinfo-operator-system -l control-plane=controller-manager --tail=200 || true
+          echo "=== Events ==="
+          kubectl get events -n imagecertinfo-operator-system --sort-by=.lastTimestamp || true
+          echo "=== All Pods ==="
+          kubectl get pods -A || true
+          echo "=== ImageCertificationInfo Resources ==="
+          kubectl get imagecertificationinfoes -A -o yaml || true
+
+  e2e-openshift:
+    name: E2E Tests on OpenShift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Create OpenShift cluster
+        uses: palmsoftware/quick-ocp@v0.0.1
+        with:
+          pull-secret: ${{ secrets.OPENSHIFT_PULL_SECRET }}
+
+      - name: Build operator image
+        run: |
+          make docker-build IMG=localhost:5000/imagecertinfo-operator:test
+
+      - name: Push to local registry
+        run: |
+          docker push localhost:5000/imagecertinfo-operator:test
+
+      - name: Deploy operator
+        run: |
+          make deploy IMG=localhost:5000/imagecertinfo-operator:test
+
+      - name: Wait for operator readiness
+        run: |
+          kubectl wait --for=condition=available --timeout=180s deployment/imagecertinfo-operator-controller-manager -n imagecertinfo-operator-system
+
+      - name: Run nightly e2e tests
+        run: |
+          make test-e2e-nightly CLUSTER_TYPE=openshift
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Controller Manager Logs ==="
+          kubectl logs -n imagecertinfo-operator-system -l control-plane=controller-manager --tail=200 || true
+          echo "=== Events ==="
+          kubectl get events -n imagecertinfo-operator-system --sort-by=.lastTimestamp || true
+          echo "=== All Pods ==="
+          kubectl get pods -A || true
+          echo "=== ImageCertificationInfo Resources ==="
+          kubectl get imagecertificationinfoes -A -o yaml || true
