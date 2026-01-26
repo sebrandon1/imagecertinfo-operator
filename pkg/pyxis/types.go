@@ -55,6 +55,19 @@ type CertificationData struct {
 
 	// AutoRebuildEnabled indicates if automatic CVE rebuilds are enabled
 	AutoRebuildEnabled bool
+
+	// Enhanced fields for v0.2.0
+
+	// ArchitectureHealth maps architecture to its health grade
+	ArchitectureHealth map[string]string
+	// UncompressedSizeBytes is the uncompressed image size in bytes
+	UncompressedSizeBytes int64
+	// LayerCount is the number of layers in the image
+	LayerCount int
+	// BuildDate is when the image was built
+	BuildDate string
+	// AdvisoryIDs contains Red Hat advisory IDs related to this image
+	AdvisoryIDs []string
 }
 
 // VulnerabilitySummary contains vulnerability counts by severity
@@ -83,6 +96,10 @@ type PyxisImageResponse struct {
 
 	// CVE rebuild setting
 	CanAutoReleaseCVERebuild bool `json:"can_auto_release_cve_rebuild,omitempty"`
+
+	// Enhanced fields for v0.2.0
+	LayerCount int    `json:"layer_count,omitempty"`
+	BuildDate  string `json:"build_date,omitempty"`
 }
 
 // PyxisImageRepository represents repository info within an image response

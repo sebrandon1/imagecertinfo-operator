@@ -11,6 +11,8 @@ spec:
     kind: ImageCertificationInfo
     listKind: ImageCertificationInfoList
     plural: imagecertificationinfoes
+    shortNames:
+    - ici
     singular: imagecertificationinfo
   scope: Cluster
   versions:
@@ -18,14 +20,24 @@ spec:
     - jsonPath: .spec.registry
       name: Registry
       type: string
-    - jsonPath: .status.registryType
-      name: Type
-      type: string
     - jsonPath: .status.certificationStatus
       name: Certified
       type: string
     - jsonPath: .status.pyxisData.healthIndex
       name: Health
+      type: string
+    - jsonPath: .status.pyxisData.vulnerabilities.critical
+      name: Critical
+      type: integer
+    - jsonPath: .status.pyxisData.vulnerabilities.important
+      name: Important
+      type: integer
+    - jsonPath: .status.daysUntilEol
+      name: EOL-Days
+      type: integer
+    - jsonPath: .status.registryType
+      name: Type
+      priority: 1
       type: string
     - jsonPath: .status.pyxisData.releaseCategory
       name: Release
@@ -162,10 +174,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              daysUntilEol:
+                description: DaysUntilEOL is the number of days until end-of-life
+                  (negative if past EOL, nil if no EOL date)
+                type: integer
               firstSeenAt:
                 description: FirstSeenAt is when this image was first observed in
                   the cluster
                 format: date-time
+                type: string
+              imageAge:
+                description: ImageAge is the computed age of the image since it was
+                  published (e.g., "45 days")
                 type: string
               lastPyxisCheckAt:
                 description: LastPyxisCheckAt is when the Pyxis API was last queried
@@ -202,6 +222,18 @@ spec:
                 description: PyxisData contains certification data from Red Hat Pyxis
                   API
                 properties:
+                  advisoryIds:
+                    description: AdvisoryIDs contains Red Hat advisory IDs related
+                      to this image (for security tracking)
+                    items:
+                      type: string
+                    type: array
+                  architectureHealth:
+                    additionalProperties:
+                      type: string
+                    description: 'ArchitectureHealth maps architecture to its health
+                      grade (e.g., {"amd64": "A", "arm64": "B"})'
+                    type: object
                   architectures:
                     description: Architectures lists the supported CPU architectures
                       (e.g., amd64, arm64, s390x, ppc64le)
@@ -212,6 +244,9 @@ spec:
                     description: AutoRebuildEnabled indicates if automatic CVE rebuilds
                       are enabled for this image
                     type: boolean
+                  buildDate:
+                    description: BuildDate is when the image was built
+                    type: string
                   catalogURL:
                     description: CatalogURL is the link to the Red Hat container catalog
                       page
@@ -228,6 +263,9 @@ spec:
                   healthIndex:
                     description: HealthIndex is the image health grade (A-F)
                     type: string
+                  layerCount:
+                    description: LayerCount is the number of layers in the image
+                    type: integer
                   projectID:
                     description: ProjectID is the Red Hat Connect project ID
                     type: string
@@ -247,6 +285,11 @@ spec:
                     description: ReplacedBy is the repository name of the image that
                       replaces this one (if deprecated)
                     type: string
+                  uncompressedSizeBytes:
+                    description: UncompressedSizeBytes is the uncompressed image size
+                      in bytes (useful for storage planning)
+                    format: int64
+                    type: integer
                   vulnerabilities:
                     description: Vulnerabilities contains vulnerability counts by
                       severity

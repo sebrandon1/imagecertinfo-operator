@@ -117,6 +117,24 @@ type PyxisData struct {
 	// AutoRebuildEnabled indicates if automatic CVE rebuilds are enabled for this image
 	// +optional
 	AutoRebuildEnabled bool `json:"autoRebuildEnabled,omitempty"`
+
+	// Enhanced fields for v0.2.0
+
+	// ArchitectureHealth maps architecture to its health grade (e.g., {"amd64": "A", "arm64": "B"})
+	// +optional
+	ArchitectureHealth map[string]string `json:"architectureHealth,omitempty"`
+	// UncompressedSizeBytes is the uncompressed image size in bytes (useful for storage planning)
+	// +optional
+	UncompressedSizeBytes int64 `json:"uncompressedSizeBytes,omitempty"`
+	// LayerCount is the number of layers in the image
+	// +optional
+	LayerCount int `json:"layerCount,omitempty"`
+	// BuildDate is when the image was built
+	// +optional
+	BuildDate string `json:"buildDate,omitempty"`
+	// AdvisoryIDs contains Red Hat advisory IDs related to this image (for security tracking)
+	// +optional
+	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
 }
 
 // ImageCertificationInfoSpec defines the desired state of ImageCertificationInfo
@@ -178,15 +196,27 @@ type ImageCertificationInfoStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Enhanced fields for v0.2.0
+
+	// ImageAge is the computed age of the image since it was published (e.g., "45 days")
+	// +optional
+	ImageAge string `json:"imageAge,omitempty"`
+	// DaysUntilEOL is the number of days until end-of-life (negative if past EOL, nil if no EOL date)
+	// +optional
+	DaysUntilEOL *int `json:"daysUntilEol,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=ici
 // +kubebuilder:printcolumn:name="Registry",type=string,JSONPath=`.spec.registry`
-// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.registryType`
 // +kubebuilder:printcolumn:name="Certified",type=string,JSONPath=`.status.certificationStatus`
 // +kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.pyxisData.healthIndex`
+// +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.pyxisData.vulnerabilities.critical`
+// +kubebuilder:printcolumn:name="Important",type=integer,JSONPath=`.status.pyxisData.vulnerabilities.important`
+// +kubebuilder:printcolumn:name="EOL-Days",type=integer,JSONPath=`.status.daysUntilEol`
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.registryType`,priority=1
 // +kubebuilder:printcolumn:name="Release",type=string,JSONPath=`.status.pyxisData.releaseCategory`,priority=1
 // +kubebuilder:printcolumn:name="EOL",type=date,JSONPath=`.status.pyxisData.eolDate`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

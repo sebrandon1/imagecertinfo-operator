@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,13 +26,24 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
+)
+
+// Event reasons for Kubernetes events
+const (
+	EventReasonImageDiscovered      = "ImageDiscovered"
+	EventReasonCertificationChanged = "CertificationChanged"
+	EventReasonVulnerabilitiesFound = "VulnerabilitiesFound"
+	EventReasonEOLApproaching       = "EOLApproaching"
+	EventReasonHealthDegraded       = "HealthDegraded"
 )
 
 // PodReconciler reconciles a Pod object and creates/updates ImageCertificationInfo resources
@@ -39,16 +51,19 @@ type PodReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
 	PyxisClient pyxis.Client
+	Recorder    record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=security.telco.openshift.io,resources=imagecertificationinfoes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=security.telco.openshift.io,resources=imagecertificationinfoes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=security.telco.openshift.io,resources=imagecertificationinfoes/finalizers,verbs=update
 
 // Reconcile watches Pods and creates/updates ImageCertificationInfo resources for each unique image
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	start := time.Now()
 	logger := log.FromContext(ctx)
 
 	// Fetch the Pod
@@ -56,14 +71,17 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Pod was deleted - we handle cleanup via owner references or periodic reconciliation
+			metrics.RecordReconcile("success", time.Since(start).Seconds(), "pod")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "unable to fetch Pod")
+		metrics.RecordReconcile("error", time.Since(start).Seconds(), "pod")
 		return ctrl.Result{}, err
 	}
 
 	// Skip pods that are not running or pending
 	if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
+		metrics.RecordReconcile("success", time.Since(start).Seconds(), "pod")
 		return ctrl.Result{}, nil
 	}
 
@@ -115,6 +133,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 	}
 
+	metrics.RecordReconcile("success", time.Since(start).Seconds(), "pod")
 	return ctrl.Result{}, nil
 }
 
@@ -163,6 +182,14 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return err
+	}
+
+	// Emit event and record metrics
+	metrics.ImagesDiscovered.Inc()
+	if r.Recorder != nil {
+		r.Recorder.Event(cr, corev1.EventTypeNormal, EventReasonImageDiscovered,
+			fmt.Sprintf("Discovered image %s", ref.FullReference))
+		metrics.RecordEvent(corev1.EventTypeNormal, EventReasonImageDiscovered)
 	}
 
 	// If Pyxis client is available and this is a Red Hat registry, check certification
@@ -277,6 +304,45 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 
 		// Security fields
 		cr.Status.PyxisData.AutoRebuildEnabled = certData.AutoRebuildEnabled
+
+		// Enhanced fields for v0.2.0
+		cr.Status.PyxisData.ArchitectureHealth = certData.ArchitectureHealth
+		cr.Status.PyxisData.UncompressedSizeBytes = certData.UncompressedSizeBytes
+		cr.Status.PyxisData.LayerCount = certData.LayerCount
+		cr.Status.PyxisData.BuildDate = certData.BuildDate
+		cr.Status.PyxisData.AdvisoryIDs = certData.AdvisoryIDs
+
+		// Compute ImageAge if PublishedAt is available
+		if cr.Status.PyxisData.PublishedAt != nil {
+			age := time.Since(cr.Status.PyxisData.PublishedAt.Time)
+			cr.Status.ImageAge = formatDuration(age)
+		}
+
+		// Compute DaysUntilEOL if EOLDate is available
+		if cr.Status.PyxisData.EOLDate != nil {
+			daysUntil := int(time.Until(cr.Status.PyxisData.EOLDate.Time).Hours() / 24)
+			cr.Status.DaysUntilEOL = &daysUntil
+
+			// Emit event if EOL approaching (within 90 days)
+			if daysUntil >= 0 && daysUntil <= 90 && r.Recorder != nil {
+				msg := fmt.Sprintf("Image reaches EOL in %d days", daysUntil)
+				if certData.ReplacedBy != "" {
+					msg += fmt.Sprintf(", replacement: %s", certData.ReplacedBy)
+				}
+				r.Recorder.Event(&cr, corev1.EventTypeWarning, EventReasonEOLApproaching, msg)
+				metrics.RecordEvent(corev1.EventTypeWarning, EventReasonEOLApproaching)
+			}
+		}
+
+		// Emit event if vulnerabilities found
+		if certData.Vulnerabilities != nil &&
+			(certData.Vulnerabilities.Critical > 0 || certData.Vulnerabilities.Important > 0) &&
+			r.Recorder != nil {
+			r.Recorder.Event(&cr, corev1.EventTypeWarning, EventReasonVulnerabilitiesFound,
+				fmt.Sprintf("Found %d critical, %d important vulnerabilities",
+					certData.Vulnerabilities.Critical, certData.Vulnerabilities.Important))
+			metrics.RecordEvent(corev1.EventTypeWarning, EventReasonVulnerabilitiesFound)
+		}
 	}
 
 	// Update status first
@@ -373,4 +439,37 @@ func (r *PodReconciler) StartCleanupLoop(ctx context.Context, interval time.Dura
 			}
 		}
 	}()
+}
+
+// formatDuration formats a duration into a human-readable string (e.g., "45 days", "3 months")
+func formatDuration(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	if days < 1 {
+		return "less than a day"
+	}
+	if days == 1 {
+		return "1 day"
+	}
+	if days < 30 {
+		return fmt.Sprintf("%d days", days)
+	}
+	months := days / 30
+	if months == 1 {
+		return "1 month"
+	}
+	if months < 12 {
+		return fmt.Sprintf("%d months", months)
+	}
+	years := months / 12
+	remainingMonths := months % 12
+	if years == 1 {
+		if remainingMonths == 0 {
+			return "1 year"
+		}
+		return fmt.Sprintf("1 year %d months", remainingMonths)
+	}
+	if remainingMonths == 0 {
+		return fmt.Sprintf("%d years", years)
+	}
+	return fmt.Sprintf("%d years %d months", years, remainingMonths)
 }
