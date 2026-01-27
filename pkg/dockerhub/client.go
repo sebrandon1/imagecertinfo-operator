@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const (
@@ -166,12 +167,16 @@ func (c *HTTPClient) GetRepositoryInfo(
 }
 
 // checkVerifiedPublisher checks if a namespace belongs to a Docker Verified Publisher.
-// This uses the namespaces API endpoint.
+// This uses the orgs API endpoint which returns a "badge" field.
 func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace string) bool {
-	requestURL := fmt.Sprintf("%s/namespaces/%s", c.baseURL, namespace)
+	log := ctrl.Log.WithName("dockerhub")
+	requestURL := fmt.Sprintf("%s/orgs/%s", c.baseURL, namespace)
+
+	log.V(1).Info("checking verified publisher status", "namespace", namespace, "url", requestURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
+		log.V(1).Info("failed to create request", "namespace", namespace, "error", err)
 		return false
 	}
 
@@ -179,25 +184,34 @@ func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace strin
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.V(1).Info("failed to execute request", "namespace", namespace, "error", err)
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		log.V(1).Info("non-OK status from orgs endpoint",
+			"namespace", namespace, "status", resp.StatusCode)
 		return false
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.V(1).Info("failed to read response body", "namespace", namespace, "error", err)
 		return false
 	}
 
-	var nsResp DockerHubNamespaceResponse
-	if err := json.Unmarshal(body, &nsResp); err != nil {
+	var orgResp DockerHubOrgResponse
+	if err := json.Unmarshal(body, &orgResp); err != nil {
+		log.V(1).Info("failed to parse response", "namespace", namespace, "error", err)
 		return false
 	}
 
-	return nsResp.IsVerifiedPublisher
+	isVerified := orgResp.Badge == "verified_publisher"
+	log.V(1).Info("verified publisher check result",
+		"namespace", namespace, "badge", orgResp.Badge, "isVerified", isVerified)
+
+	return isVerified
 }
 
 // IsHealthy checks if the Docker Hub API is accessible

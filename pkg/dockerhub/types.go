@@ -63,9 +63,23 @@ type DockerHubRepositoryResponse struct {
 }
 
 // DockerHubNamespaceResponse represents namespace info from Docker Hub
+// Deprecated: Use DockerHubOrgResponse instead
 type DockerHubNamespaceResponse struct {
 	ID                  string   `json:"id"`
 	Name                string   `json:"name"`
 	IsVerifiedPublisher bool     `json:"is_verified_publisher"`
 	ContentTypes        []string `json:"content_types"`
+}
+
+// DockerHubOrgResponse represents organization info from Docker Hub
+// GET https://hub.docker.com/v2/orgs/{namespace}
+type DockerHubOrgResponse struct {
+	ID       string `json:"id"`
+	Orgname  string `json:"orgname"`
+	FullName string `json:"full_name"`
+	Company  string `json:"company"`
+	Type     string `json:"type"`
+	// Badge indicates the trust level: "verified_publisher", "open_source", etc.
+	Badge    string `json:"badge"`
+	IsActive bool   `json:"is_active"`
 }

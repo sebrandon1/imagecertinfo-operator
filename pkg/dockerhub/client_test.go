@@ -31,7 +31,7 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 		namespace     string
 		repository    string
 		repoResponse  *DockerHubRepositoryResponse
-		nsResponse    *DockerHubNamespaceResponse
+		orgResponse   *DockerHubOrgResponse
 		serverStatus  int
 		wantErr       bool
 		wantNil       bool
@@ -70,9 +70,9 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 				LastUpdated: time.Now().Add(-5 * 24 * time.Hour),
 				Description: "Bitnami Redis",
 			},
-			nsResponse: &DockerHubNamespaceResponse{
-				Name:                "bitnami",
-				IsVerifiedPublisher: true,
+			orgResponse: &DockerHubOrgResponse{
+				Orgname: "bitnami",
+				Badge:   "verified_publisher",
 			},
 			serverStatus:  http.StatusOK,
 			wantErr:       false,
@@ -93,9 +93,9 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 				LastUpdated: time.Now().Add(-100 * 24 * time.Hour),
 				Description: "My test app",
 			},
-			nsResponse: &DockerHubNamespaceResponse{
-				Name:                "someuser",
-				IsVerifiedPublisher: false,
+			orgResponse: &DockerHubOrgResponse{
+				Orgname: "someuser",
+				Badge:   "",
 			},
 			serverStatus:  http.StatusOK,
 			wantErr:       false,
@@ -131,11 +131,11 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Handle namespace endpoint for verified publisher check
-				if r.URL.Path == "/namespaces/"+tt.namespace {
-					if tt.nsResponse != nil {
+				// Handle orgs endpoint for verified publisher check
+				if r.URL.Path == "/orgs/"+tt.namespace {
+					if tt.orgResponse != nil {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(tt.nsResponse)
+						_ = json.NewEncoder(w).Encode(tt.orgResponse)
 					} else {
 						w.WriteHeader(http.StatusNotFound)
 					}
