@@ -310,6 +310,7 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 					"containers": [{
 						"name": "nginx",
 						"image": "%s",
+						"command": ["sleep", "3600"],
 						"securityContext": {
 							"readOnlyRootFilesystem": true,
 							"allowPrivilegeEscalation": false,
