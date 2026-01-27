@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -257,73 +258,12 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		// No certification data found
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
 	} else {
-		// Update with certification data
-		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusCertified
-		cr.Status.PyxisData = &securityv1alpha1.PyxisData{
-			ProjectID:   certData.ProjectID,
-			Publisher:   certData.Publisher,
-			HealthIndex: certData.HealthIndex,
-			CatalogURL:  certData.CatalogURL,
-		}
+		// Update with certification data using shared method
+		r.updateCRWithPyxisData(&cr, certData)
 
-		// Parse and set PublishedAt timestamp
-		if certData.PublishedAt != "" {
-			// Pyxis returns timestamps in ISO 8601 format
-			if publishedTime, parseErr := time.Parse(time.RFC3339, certData.PublishedAt); parseErr == nil {
-				publishedAt := metav1.NewTime(publishedTime)
-				cr.Status.PyxisData.PublishedAt = &publishedAt
-			}
-		}
-
-		if certData.Vulnerabilities != nil {
-			cr.Status.PyxisData.Vulnerabilities = &securityv1alpha1.VulnerabilitySummary{
-				Critical:  certData.Vulnerabilities.Critical,
-				Important: certData.Vulnerabilities.Important,
-				Moderate:  certData.Vulnerabilities.Moderate,
-				Low:       certData.Vulnerabilities.Low,
-			}
-		}
-
-		// Lifecycle fields
-		if certData.EOLDate != "" {
-			// Parse EOL date (may be in different formats)
-			if eolTime, parseErr := time.Parse(time.RFC3339, certData.EOLDate); parseErr == nil {
-				eolDate := metav1.NewTime(eolTime)
-				cr.Status.PyxisData.EOLDate = &eolDate
-			} else if eolTime, parseErr := time.Parse("2006-01-02", certData.EOLDate); parseErr == nil {
-				eolDate := metav1.NewTime(eolTime)
-				cr.Status.PyxisData.EOLDate = &eolDate
-			}
-		}
-		cr.Status.PyxisData.ReleaseCategory = certData.ReleaseCategory
-		cr.Status.PyxisData.ReplacedBy = certData.ReplacedBy
-
-		// Operational fields
-		cr.Status.PyxisData.Architectures = certData.Architectures
-		cr.Status.PyxisData.CompressedSizeBytes = certData.CompressedSizeBytes
-
-		// Security fields
-		cr.Status.PyxisData.AutoRebuildEnabled = certData.AutoRebuildEnabled
-
-		// Enhanced fields for v0.2.0
-		cr.Status.PyxisData.ArchitectureHealth = certData.ArchitectureHealth
-		cr.Status.PyxisData.UncompressedSizeBytes = certData.UncompressedSizeBytes
-		cr.Status.PyxisData.LayerCount = certData.LayerCount
-		cr.Status.PyxisData.BuildDate = certData.BuildDate
-		cr.Status.PyxisData.AdvisoryIDs = certData.AdvisoryIDs
-
-		// Compute ImageAge if PublishedAt is available
-		if cr.Status.PyxisData.PublishedAt != nil {
-			age := time.Since(cr.Status.PyxisData.PublishedAt.Time)
-			cr.Status.ImageAge = formatDuration(age)
-		}
-
-		// Compute DaysUntilEOL if EOLDate is available
-		if cr.Status.PyxisData.EOLDate != nil {
-			daysUntil := int(time.Until(cr.Status.PyxisData.EOLDate.Time).Hours() / 24)
-			cr.Status.DaysUntilEOL = &daysUntil
-
-			// Emit event if EOL approaching (within 90 days)
+		// Emit event if EOL approaching (within 90 days)
+		if cr.Status.DaysUntilEOL != nil {
+			daysUntil := *cr.Status.DaysUntilEOL
 			if daysUntil >= 0 && daysUntil <= 90 && r.Recorder != nil {
 				msg := fmt.Sprintf("Image reaches EOL in %d days", daysUntil)
 				if certData.ReplacedBy != "" {
@@ -352,18 +292,7 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 
 	// Update CVE annotations separately (after status update)
 	if certData != nil && len(certData.CVEs) > 0 {
-		// Re-fetch CR to get current resourceVersion for object update
-		var crForAnnotation securityv1alpha1.ImageCertificationInfo
-		if fetchErr := r.Get(ctx, client.ObjectKey{Name: crName}, &crForAnnotation); fetchErr != nil {
-			logger.Error(fetchErr, "failed to fetch CR for annotation update")
-			return
-		}
-		if crForAnnotation.Annotations == nil {
-			crForAnnotation.Annotations = make(map[string]string)
-		}
-		// Store CVEs as comma-separated list in annotation
-		crForAnnotation.Annotations["security.telco.openshift.io/cves"] = strings.Join(certData.CVEs, ",")
-		if updateErr := r.Update(ctx, &crForAnnotation); updateErr != nil {
+		if updateErr := r.updateCVEAnnotations(ctx, crName, certData.CVEs); updateErr != nil {
 			logger.Error(updateErr, "failed to update CVE annotations")
 		}
 	}
@@ -439,6 +368,306 @@ func (r *PodReconciler) StartCleanupLoop(ctx context.Context, interval time.Dura
 			}
 		}
 	}()
+}
+
+// StartRefreshLoop starts a goroutine that periodically refreshes all ImageCertificationInfo resources
+func (r *PodReconciler) StartRefreshLoop(ctx context.Context, interval time.Duration) {
+	go func() {
+		logger := log.FromContext(ctx).WithName("refresh-loop")
+
+		// Random startup delay (0-5 minutes) to avoid thundering herd
+		startupDelay := time.Duration(rand.Int63n(int64(5 * time.Minute))) //nolint:gosec
+		logger.Info("refresh loop starting with delay", "delay", startupDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(startupDelay):
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Run immediately after startup delay
+		if err := r.RefreshAllImages(ctx); err != nil {
+			logger.Error(err, "failed to refresh images")
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := r.RefreshAllImages(ctx); err != nil {
+					logger.Error(err, "failed to refresh images")
+				}
+			}
+		}
+	}()
+}
+
+// RefreshAllImages refreshes certification data for all Red Hat registry images
+func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("refresh")
+	start := time.Now()
+
+	// List all ImageCertificationInfo resources
+	var crList securityv1alpha1.ImageCertificationInfoList
+	if err := r.List(ctx, &crList); err != nil {
+		return err
+	}
+
+	refreshed := 0
+	skipped := 0
+	errors := 0
+
+	for i := range crList.Items {
+		cr := &crList.Items[i]
+
+		// Only refresh Red Hat registry images (Pyxis only has data for these)
+		if !image.IsRedHatRegistry(cr.Spec.Registry) {
+			skipped++
+			continue
+		}
+
+		// Skip if checked within the last hour (staggering)
+		if cr.Status.LastPyxisCheckAt != nil {
+			if time.Since(cr.Status.LastPyxisCheckAt.Time) < time.Hour {
+				skipped++
+				continue
+			}
+		}
+
+		// Refresh single image with delay between requests (staggering)
+		if err := r.refreshSingleImage(ctx, cr); err != nil {
+			logger.Error(err, "failed to refresh image", "name", cr.Name)
+			errors++
+		} else {
+			refreshed++
+		}
+
+		// 100ms delay between refreshes to avoid API overload
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	duration := time.Since(start)
+	metrics.RecordRefreshCycle(duration.Seconds())
+
+	logger.Info("refresh cycle completed",
+		"duration", duration,
+		"refreshed", refreshed,
+		"skipped", skipped,
+		"errors", errors,
+		"total", len(crList.Items))
+
+	return nil
+}
+
+// refreshSingleImage refreshes certification data for a single ImageCertificationInfo
+func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo) error {
+	if r.PyxisClient == nil {
+		return nil
+	}
+
+	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
+
+	// Store old values for change detection
+	oldCertStatus := cr.Status.CertificationStatus
+	var oldHealthIndex string
+	var oldCriticalVulns, oldImportantVulns int
+	if cr.Status.PyxisData != nil {
+		oldHealthIndex = cr.Status.PyxisData.HealthIndex
+		if cr.Status.PyxisData.Vulnerabilities != nil {
+			oldCriticalVulns = cr.Status.PyxisData.Vulnerabilities.Critical
+			oldImportantVulns = cr.Status.PyxisData.Vulnerabilities.Important
+		}
+	}
+
+	// Query Pyxis
+	certData, err := r.PyxisClient.GetImageCertification(ctx, cr.Spec.Registry, cr.Spec.Repository, cr.Spec.ImageDigest)
+	if err != nil {
+		logger.Error(err, "failed to query Pyxis API during refresh")
+		return err
+	}
+
+	// Re-fetch CR to get latest version (avoid conflicts)
+	var latestCR securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: cr.Name}, &latestCR); err != nil {
+		return err
+	}
+
+	// Update CR with Pyxis data
+	now := metav1.Now()
+	latestCR.Status.LastPyxisCheckAt = &now
+
+	if certData == nil {
+		latestCR.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+	} else {
+		r.updateCRWithPyxisData(&latestCR, certData)
+	}
+
+	if err := r.Status().Update(ctx, &latestCR); err != nil {
+		logger.Error(err, "failed to update ImageCertificationInfo during refresh")
+		return err
+	}
+
+	// Update CVE annotations if available
+	if certData != nil && len(certData.CVEs) > 0 {
+		if err := r.updateCVEAnnotations(ctx, latestCR.Name, certData.CVEs); err != nil {
+			logger.Error(err, "failed to update CVE annotations during refresh")
+		}
+	}
+
+	metrics.RecordImageRefreshed()
+
+	// Emit change events
+	var newHealthIndex string
+	var newCriticalVulns, newImportantVulns int
+	if latestCR.Status.PyxisData != nil {
+		newHealthIndex = latestCR.Status.PyxisData.HealthIndex
+		if latestCR.Status.PyxisData.Vulnerabilities != nil {
+			newCriticalVulns = latestCR.Status.PyxisData.Vulnerabilities.Critical
+			newImportantVulns = latestCR.Status.PyxisData.Vulnerabilities.Important
+		}
+	}
+
+	r.emitChangeEvents(&latestCR, oldCertStatus, latestCR.Status.CertificationStatus,
+		oldHealthIndex, newHealthIndex,
+		oldCriticalVulns, oldImportantVulns, newCriticalVulns, newImportantVulns)
+
+	return nil
+}
+
+// updateCRWithPyxisData updates a CR's status with data from Pyxis
+func (r *PodReconciler) updateCRWithPyxisData(cr *securityv1alpha1.ImageCertificationInfo, certData *pyxis.CertificationData) {
+	cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusCertified
+	cr.Status.PyxisData = &securityv1alpha1.PyxisData{
+		ProjectID:   certData.ProjectID,
+		Publisher:   certData.Publisher,
+		HealthIndex: certData.HealthIndex,
+		CatalogURL:  certData.CatalogURL,
+	}
+
+	// Parse and set PublishedAt timestamp
+	if certData.PublishedAt != "" {
+		if publishedTime, parseErr := time.Parse(time.RFC3339, certData.PublishedAt); parseErr == nil {
+			publishedAt := metav1.NewTime(publishedTime)
+			cr.Status.PyxisData.PublishedAt = &publishedAt
+		}
+	}
+
+	if certData.Vulnerabilities != nil {
+		cr.Status.PyxisData.Vulnerabilities = &securityv1alpha1.VulnerabilitySummary{
+			Critical:  certData.Vulnerabilities.Critical,
+			Important: certData.Vulnerabilities.Important,
+			Moderate:  certData.Vulnerabilities.Moderate,
+			Low:       certData.Vulnerabilities.Low,
+		}
+	}
+
+	// Lifecycle fields
+	if certData.EOLDate != "" {
+		if eolTime, parseErr := time.Parse(time.RFC3339, certData.EOLDate); parseErr == nil {
+			eolDate := metav1.NewTime(eolTime)
+			cr.Status.PyxisData.EOLDate = &eolDate
+		} else if eolTime, parseErr := time.Parse("2006-01-02", certData.EOLDate); parseErr == nil {
+			eolDate := metav1.NewTime(eolTime)
+			cr.Status.PyxisData.EOLDate = &eolDate
+		}
+	}
+	cr.Status.PyxisData.ReleaseCategory = certData.ReleaseCategory
+	cr.Status.PyxisData.ReplacedBy = certData.ReplacedBy
+
+	// Operational fields
+	cr.Status.PyxisData.Architectures = certData.Architectures
+	cr.Status.PyxisData.CompressedSizeBytes = certData.CompressedSizeBytes
+
+	// Security fields
+	cr.Status.PyxisData.AutoRebuildEnabled = certData.AutoRebuildEnabled
+
+	// Enhanced fields for v0.2.0
+	cr.Status.PyxisData.ArchitectureHealth = certData.ArchitectureHealth
+	cr.Status.PyxisData.UncompressedSizeBytes = certData.UncompressedSizeBytes
+	cr.Status.PyxisData.LayerCount = certData.LayerCount
+	cr.Status.PyxisData.BuildDate = certData.BuildDate
+	cr.Status.PyxisData.AdvisoryIDs = certData.AdvisoryIDs
+
+	// Compute ImageAge if PublishedAt is available
+	if cr.Status.PyxisData.PublishedAt != nil {
+		age := time.Since(cr.Status.PyxisData.PublishedAt.Time)
+		cr.Status.ImageAge = formatDuration(age)
+	}
+
+	// Compute DaysUntilEOL if EOLDate is available
+	if cr.Status.PyxisData.EOLDate != nil {
+		daysUntil := int(time.Until(cr.Status.PyxisData.EOLDate.Time).Hours() / 24)
+		cr.Status.DaysUntilEOL = &daysUntil
+	}
+}
+
+// updateCVEAnnotations updates the CVE annotation on a CR
+func (r *PodReconciler) updateCVEAnnotations(ctx context.Context, crName string, cves []string) error {
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		return err
+	}
+	if cr.Annotations == nil {
+		cr.Annotations = make(map[string]string)
+	}
+	cr.Annotations["security.telco.openshift.io/cves"] = strings.Join(cves, ",")
+	return r.Update(ctx, &cr)
+}
+
+// emitChangeEvents emits Kubernetes events when certification status, health, or vulnerabilities change
+func (r *PodReconciler) emitChangeEvents(cr *securityv1alpha1.ImageCertificationInfo,
+	oldCertStatus, newCertStatus securityv1alpha1.CertificationStatus,
+	oldHealth, newHealth string,
+	oldCritical, oldImportant, newCritical, newImportant int) {
+
+	if r.Recorder == nil {
+		return
+	}
+
+	// Certification status changed
+	if oldCertStatus != newCertStatus && oldCertStatus != "" {
+		msg := fmt.Sprintf("Certification status changed from %s to %s", oldCertStatus, newCertStatus)
+		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonCertificationChanged, msg)
+		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonCertificationChanged)
+		metrics.RecordCertificationStatusChange(string(oldCertStatus), string(newCertStatus))
+	}
+
+	// Health grade degraded
+	if oldHealth != "" && newHealth != "" && isHealthDegraded(oldHealth, newHealth) {
+		msg := fmt.Sprintf("Health grade degraded from %s to %s", oldHealth, newHealth)
+		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonHealthDegraded, msg)
+		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonHealthDegraded)
+	}
+
+	// New critical/important vulnerabilities
+	if newCritical > oldCritical || newImportant > oldImportant {
+		msg := fmt.Sprintf("Vulnerabilities increased: critical %d→%d, important %d→%d",
+			oldCritical, newCritical, oldImportant, newImportant)
+		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonVulnerabilitiesFound, msg)
+		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonVulnerabilitiesFound)
+	}
+}
+
+// isHealthDegraded compares health grades and returns true if the new grade is worse
+// Health grades are A > B > C > D > F
+func isHealthDegraded(oldGrade, newGrade string) bool {
+	gradeOrder := map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
+
+	oldVal, oldOk := gradeOrder[oldGrade]
+	newVal, newOk := gradeOrder[newGrade]
+
+	if !oldOk || !newOk {
+		return false
+	}
+
+	return newVal < oldVal
 }
 
 // formatDuration formats a duration into a human-readable string (e.g., "45 days", "3 months")
