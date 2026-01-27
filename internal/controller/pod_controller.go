@@ -34,6 +34,7 @@ import (
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
@@ -47,12 +48,18 @@ const (
 	EventReasonHealthDegraded       = "HealthDegraded"
 )
 
+// Registry constants
+const (
+	RegistryDockerHub = "docker.io"
+)
+
 // PodReconciler reconciles a Pod object and creates/updates ImageCertificationInfo resources
 type PodReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	PyxisClient pyxis.Client
-	Recorder    record.EventRecorder
+	Scheme          *runtime.Scheme
+	PyxisClient     pyxis.Client
+	DockerHubClient dockerhub.Client
+	Recorder        record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -198,6 +205,11 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 		go r.checkPyxisCertification(context.Background(), cr.Name, ref)
 	}
 
+	// If Docker Hub client is available and this is docker.io, enrich with Docker Hub data
+	if r.DockerHubClient != nil && ref.Registry == RegistryDockerHub {
+		go r.checkDockerHubData(context.Background(), cr.Name, ref)
+	}
+
 	return nil
 }
 
@@ -295,6 +307,83 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		if updateErr := r.updateCVEAnnotations(ctx, crName, certData.CVEs); updateErr != nil {
 			logger.Error(updateErr, "failed to update CVE annotations")
 		}
+	}
+}
+
+// checkDockerHubData queries the Docker Hub API for repository metadata
+func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, ref *image.Reference) {
+	logger := log.FromContext(ctx).WithValues("crName", crName)
+
+	if r.DockerHubClient == nil {
+		return
+	}
+
+	// Parse namespace and repository from the repository path
+	// For official images: library/nginx -> namespace=library, repo=nginx
+	// For user images: bitnami/redis -> namespace=bitnami, repo=redis
+	namespace, repo := parseDockerHubRepo(ref.Repository)
+
+	// Query Docker Hub
+	repoInfo, err := r.DockerHubClient.GetRepositoryInfo(ctx, namespace, repo)
+
+	// Fetch the latest version of the CR
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		logger.Error(err, "failed to get ImageCertificationInfo for Docker Hub update")
+		return
+	}
+
+	if err != nil {
+		logger.Error(err, "failed to query Docker Hub API")
+		return
+	}
+
+	if repoInfo == nil {
+		// No data found
+		return
+	}
+
+	// Update CR with Docker Hub data
+	r.updateCRWithDockerHubData(&cr, repoInfo)
+
+	// Update status
+	if err := r.Status().Update(ctx, &cr); err != nil {
+		logger.Error(err, "failed to update ImageCertificationInfo with Docker Hub data")
+	}
+}
+
+// parseDockerHubRepo parses a repository path into namespace and repository name
+func parseDockerHubRepo(repository string) (namespace, repo string) {
+	parts := strings.SplitN(repository, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	// If no slash, it's an official image
+	return "library", repository
+}
+
+// updateCRWithDockerHubData updates a CR's status with data from Docker Hub
+func (r *PodReconciler) updateCRWithDockerHubData(cr *securityv1alpha1.ImageCertificationInfo, repoInfo *dockerhub.RepositoryInfo) {
+	daysSinceUpdate := dockerhub.CalculateDaysSince(repoInfo.LastUpdated)
+
+	cr.Status.DockerHubData = &securityv1alpha1.DockerHubData{
+		IsOfficialImage:     repoInfo.IsOfficial,
+		IsVerifiedPublisher: repoInfo.IsVerifiedPublisher,
+		PullCount:           repoInfo.PullCount,
+		StarCount:           repoInfo.StarCount,
+		LastUpdated:         &metav1.Time{Time: repoInfo.LastUpdated},
+		DaysSinceUpdate:     &daysSinceUpdate,
+		PullCountFormatted:  dockerhub.FormatPullCount(repoInfo.PullCount),
+	}
+
+	// Update certification status based on Docker Hub trust level
+	if repoInfo.IsOfficial {
+		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusOfficial
+	} else if repoInfo.IsVerifiedPublisher {
+		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusVerified
+	} else if cr.Status.CertificationStatus == securityv1alpha1.CertificationStatusUnknown {
+		// Only update to NotCertified if currently Unknown
+		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
 	}
 }
 
@@ -423,14 +512,18 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 	for i := range crList.Items {
 		cr := &crList.Items[i]
 
-		// Only refresh Red Hat registry images (Pyxis only has data for these)
-		if !image.IsRedHatRegistry(cr.Spec.Registry) {
+		// Determine which API to use based on registry
+		isRedHatRegistry := image.IsRedHatRegistry(cr.Spec.Registry)
+		isDockerHub := cr.Spec.Registry == RegistryDockerHub
+
+		// Skip if no enrichment is possible
+		if !isRedHatRegistry && !isDockerHub {
 			skipped++
 			continue
 		}
 
 		// Skip if checked within the last hour (staggering)
-		if cr.Status.LastPyxisCheckAt != nil {
+		if cr.Status.LastPyxisCheckAt != nil && isRedHatRegistry {
 			if time.Since(cr.Status.LastPyxisCheckAt.Time) < time.Hour {
 				skipped++
 				continue
@@ -468,30 +561,7 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 
 // refreshSingleImage refreshes certification data for a single ImageCertificationInfo
 func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo) error {
-	if r.PyxisClient == nil {
-		return nil
-	}
-
 	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
-
-	// Store old values for change detection
-	oldCertStatus := cr.Status.CertificationStatus
-	var oldHealthIndex string
-	var oldCriticalVulns, oldImportantVulns int
-	if cr.Status.PyxisData != nil {
-		oldHealthIndex = cr.Status.PyxisData.HealthIndex
-		if cr.Status.PyxisData.Vulnerabilities != nil {
-			oldCriticalVulns = cr.Status.PyxisData.Vulnerabilities.Critical
-			oldImportantVulns = cr.Status.PyxisData.Vulnerabilities.Important
-		}
-	}
-
-	// Query Pyxis
-	certData, err := r.PyxisClient.GetImageCertification(ctx, cr.Spec.Registry, cr.Spec.Repository, cr.Spec.ImageDigest)
-	if err != nil {
-		logger.Error(err, "failed to query Pyxis API during refresh")
-		return err
-	}
 
 	// Re-fetch CR to get latest version (avoid conflicts)
 	var latestCR securityv1alpha1.ImageCertificationInfo
@@ -499,14 +569,54 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 		return err
 	}
 
-	// Update CR with Pyxis data
-	now := metav1.Now()
-	latestCR.Status.LastPyxisCheckAt = &now
+	// Store old values for change detection
+	oldCertStatus := latestCR.Status.CertificationStatus
+	var oldHealthIndex string
+	var oldCriticalVulns, oldImportantVulns int
+	if latestCR.Status.PyxisData != nil {
+		oldHealthIndex = latestCR.Status.PyxisData.HealthIndex
+		if latestCR.Status.PyxisData.Vulnerabilities != nil {
+			oldCriticalVulns = latestCR.Status.PyxisData.Vulnerabilities.Critical
+			oldImportantVulns = latestCR.Status.PyxisData.Vulnerabilities.Important
+		}
+	}
 
-	if certData == nil {
-		latestCR.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+	// Track CVEs for annotation updates (only relevant for Pyxis)
+	var cves []string
+
+	// Refresh based on registry type
+	if image.IsRedHatRegistry(cr.Spec.Registry) && r.PyxisClient != nil {
+		// Query Pyxis for Red Hat registry images
+		certData, err := r.PyxisClient.GetImageCertification(ctx, cr.Spec.Registry, cr.Spec.Repository, cr.Spec.ImageDigest)
+		if err != nil {
+			logger.Error(err, "failed to query Pyxis API during refresh")
+			return err
+		}
+
+		now := metav1.Now()
+		latestCR.Status.LastPyxisCheckAt = &now
+
+		if certData == nil {
+			latestCR.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+		} else {
+			r.updateCRWithPyxisData(&latestCR, certData)
+			cves = certData.CVEs
+		}
+	} else if cr.Spec.Registry == RegistryDockerHub && r.DockerHubClient != nil {
+		// Query Docker Hub for docker.io images
+		namespace, repo := parseDockerHubRepo(cr.Spec.Repository)
+		repoInfo, err := r.DockerHubClient.GetRepositoryInfo(ctx, namespace, repo)
+		if err != nil {
+			logger.Error(err, "failed to query Docker Hub API during refresh")
+			return err
+		}
+
+		if repoInfo != nil {
+			r.updateCRWithDockerHubData(&latestCR, repoInfo)
+		}
 	} else {
-		r.updateCRWithPyxisData(&latestCR, certData)
+		// No client available for this registry
+		return nil
 	}
 
 	if err := r.Status().Update(ctx, &latestCR); err != nil {
@@ -515,8 +625,8 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 	}
 
 	// Update CVE annotations if available
-	if certData != nil && len(certData.CVEs) > 0 {
-		if err := r.updateCVEAnnotations(ctx, latestCR.Name, certData.CVEs); err != nil {
+	if len(cves) > 0 {
+		if err := r.updateCVEAnnotations(ctx, latestCR.Name, cves); err != nil {
 			logger.Error(err, "failed to update CVE annotations during refresh")
 		}
 	}

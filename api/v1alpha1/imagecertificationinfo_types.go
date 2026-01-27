@@ -33,11 +33,13 @@ const (
 )
 
 // CertificationStatus indicates the certification status of an image
-// +kubebuilder:validation:Enum=Certified;NotCertified;Pending;Unknown;Error
+// +kubebuilder:validation:Enum=Certified;Official;Verified;NotCertified;Pending;Unknown;Error
 type CertificationStatus string
 
 const (
-	CertificationStatusCertified    CertificationStatus = "Certified"
+	CertificationStatusCertified    CertificationStatus = "Certified" // Red Hat certified
+	CertificationStatusOfficial     CertificationStatus = "Official"  // Docker Official Image
+	CertificationStatusVerified     CertificationStatus = "Verified"  // Docker Verified Publisher
 	CertificationStatusNotCertified CertificationStatus = "NotCertified"
 	CertificationStatusPending      CertificationStatus = "Pending"
 	CertificationStatusUnknown      CertificationStatus = "Unknown"
@@ -137,6 +139,37 @@ type PyxisData struct {
 	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
 }
 
+// DockerHubData contains metadata from Docker Hub public API
+type DockerHubData struct {
+	// IsOfficialImage is true if the image is a Docker Official Image (library namespace)
+	// +optional
+	IsOfficialImage bool `json:"isOfficialImage,omitempty"`
+
+	// IsVerifiedPublisher is true if the image is from a Docker Verified Publisher
+	// +optional
+	IsVerifiedPublisher bool `json:"isVerifiedPublisher,omitempty"`
+
+	// PullCount is the total number of pulls for this image
+	// +optional
+	PullCount int64 `json:"pullCount,omitempty"`
+
+	// StarCount is the number of stars on Docker Hub
+	// +optional
+	StarCount int `json:"starCount,omitempty"`
+
+	// LastUpdated is when the image was last updated on Docker Hub
+	// +optional
+	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
+
+	// DaysSinceUpdate is the computed days since the image was last updated
+	// +optional
+	DaysSinceUpdate *int `json:"daysSinceUpdate,omitempty"`
+
+	// PullCountFormatted is human-readable pull count (e.g., "12.7B", "434M")
+	// +optional
+	PullCountFormatted string `json:"pullCountFormatted,omitempty"`
+}
+
 // ImageCertificationInfoSpec defines the desired state of ImageCertificationInfo
 type ImageCertificationInfoSpec struct {
 	// ImageDigest is the sha256 digest of the image
@@ -174,6 +207,10 @@ type ImageCertificationInfoStatus struct {
 	// PyxisData contains certification data from Red Hat Pyxis API
 	// +optional
 	PyxisData *PyxisData `json:"pyxisData,omitempty"`
+
+	// DockerHubData contains metadata from Docker Hub (only populated for docker.io images)
+	// +optional
+	DockerHubData *DockerHubData `json:"dockerHubData,omitempty"`
 
 	// PodReferences lists all pods currently using this image
 	// +optional
@@ -215,11 +252,13 @@ type ImageCertificationInfoStatus struct {
 // +kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.pyxisData.healthIndex`
 // +kubebuilder:printcolumn:name="Critical",type=integer,JSONPath=`.status.pyxisData.vulnerabilities.critical`
 // +kubebuilder:printcolumn:name="Important",type=integer,JSONPath=`.status.pyxisData.vulnerabilities.important`
-// +kubebuilder:printcolumn:name="EOL-Days",type=integer,JSONPath=`.status.daysUntilEol`
+// +kubebuilder:printcolumn:name="Pulls",type=string,JSONPath=`.status.dockerHubData.pullCountFormatted`
+// +kubebuilder:printcolumn:name="Freshness",type=integer,JSONPath=`.status.dockerHubData.daysSinceUpdate`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.status.registryType`,priority=1
+// +kubebuilder:printcolumn:name="EOL-Days",type=integer,JSONPath=`.status.daysUntilEol`,priority=1
 // +kubebuilder:printcolumn:name="Release",type=string,JSONPath=`.status.pyxisData.releaseCategory`,priority=1
 // +kubebuilder:printcolumn:name="EOL",type=date,JSONPath=`.status.pyxisData.eolDate`,priority=1
-// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ImageCertificationInfo is the Schema for the imagecertificationinfos API
 type ImageCertificationInfo struct {

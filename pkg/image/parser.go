@@ -74,19 +74,19 @@ func ParseImageID(imageID string) (*Reference, error) {
 
 	// Parse registry and repository
 	// First slash typically separates registry from repository
-	slashIdx := strings.Index(imageWithoutDigest, "/")
-	if slashIdx == -1 {
+	before, after, ok := strings.Cut(imageWithoutDigest, "/")
+	if !ok {
 		// No slash means it's a docker.io library image
 		ref.Registry = "docker.io"
 		ref.Repository = "library/" + imageWithoutDigest
 	} else {
-		possibleRegistry := imageWithoutDigest[:slashIdx]
+		possibleRegistry := before
 		// Check if the first part is a registry (contains . or : or is localhost)
 		if strings.Contains(possibleRegistry, ".") ||
 			strings.Contains(possibleRegistry, ":") ||
 			possibleRegistry == "localhost" {
 			ref.Registry = possibleRegistry
-			ref.Repository = imageWithoutDigest[slashIdx+1:]
+			ref.Repository = after
 		} else {
 			// No registry specified, assume docker.io
 			ref.Registry = "docker.io"

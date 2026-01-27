@@ -194,6 +194,39 @@ var (
 		},
 		[]string{"from", "to"},
 	)
+
+	// Docker Hub API Metrics
+
+	// DockerHubRequestsTotal tracks total Docker Hub API requests
+	DockerHubRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "dockerhub_requests_total",
+			Help:      "Total number of Docker Hub API requests",
+		},
+		[]string{"status", "endpoint"},
+	)
+
+	// DockerHubRequestDuration tracks Docker Hub API request duration
+	DockerHubRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: MetricsNamespace,
+			Name:      "dockerhub_request_duration_seconds",
+			Help:      "Duration of Docker Hub API requests in seconds",
+			Buckets:   []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{"endpoint"},
+	)
+
+	// DockerHubCacheHits tracks cache hit/miss ratio
+	DockerHubCacheHits = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "dockerhub_cache_hits_total",
+			Help:      "Total number of Docker Hub cache hits and misses",
+		},
+		[]string{"result"}, // "hit" or "miss"
+	)
 )
 
 func init() {
@@ -220,6 +253,10 @@ func init() {
 		RefreshDurationSeconds,
 		ImagesRefreshedTotal,
 		CertificationStatusChangesTotal,
+		// Docker Hub API metrics
+		DockerHubRequestsTotal,
+		DockerHubRequestDuration,
+		DockerHubCacheHits,
 	)
 }
 
@@ -264,4 +301,20 @@ func RecordImageRefreshed() {
 // RecordCertificationStatusChange records a certification status change
 func RecordCertificationStatusChange(from, to string) {
 	CertificationStatusChangesTotal.WithLabelValues(from, to).Inc()
+}
+
+// RecordDockerHubRequest records a Docker Hub API request metric
+func RecordDockerHubRequest(status, endpoint string, durationSeconds float64) {
+	DockerHubRequestsTotal.WithLabelValues(status, endpoint).Inc()
+	DockerHubRequestDuration.WithLabelValues(endpoint).Observe(durationSeconds)
+}
+
+// RecordDockerHubCacheHit records a Docker Hub cache hit
+func RecordDockerHubCacheHit() {
+	DockerHubCacheHits.WithLabelValues("hit").Inc()
+}
+
+// RecordDockerHubCacheMiss records a Docker Hub cache miss
+func RecordDockerHubCacheMiss() {
+	DockerHubCacheHits.WithLabelValues("miss").Inc()
 }
