@@ -38,6 +38,7 @@ import (
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 	// +kubebuilder:scaffold:imports
 )
@@ -75,6 +76,12 @@ func main() {
 	var pyxisRateBurst int
 	var pyxisRefreshInterval time.Duration
 
+	// Docker Hub configuration flags
+	var dockerHubEnabled bool
+	var dockerHubCacheTTL time.Duration
+	var dockerHubRateLimit float64
+	var dockerHubRateBurst int
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -110,6 +117,16 @@ func main() {
 		"Burst size for Pyxis API rate limiting (default 20)")
 	flag.DurationVar(&pyxisRefreshInterval, "pyxis-refresh-interval", 24*time.Hour,
 		"Interval for periodic refresh of Pyxis certification data (0 to disable, default 24h)")
+
+	// Docker Hub flags
+	flag.BoolVar(&dockerHubEnabled, "dockerhub-enabled", true,
+		"Enable Docker Hub metadata enrichment for docker.io images")
+	flag.DurationVar(&dockerHubCacheTTL, "dockerhub-cache-ttl", dockerhub.DefaultCacheTTL,
+		"TTL for cached Docker Hub API responses (default 1 hour)")
+	flag.Float64Var(&dockerHubRateLimit, "dockerhub-rate-limit", dockerhub.DefaultRateLimit,
+		"Rate limit for Docker Hub API requests per second (default 5)")
+	flag.IntVar(&dockerHubRateBurst, "dockerhub-rate-burst", dockerhub.DefaultRateBurst,
+		"Burst size for Docker Hub API rate limiting (default 10)")
 
 	opts := zap.Options{
 		Development: true,
@@ -237,12 +254,27 @@ func main() {
 		pyxisClient = pyxis.NewCachedRateLimitedClient(baseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst)
 	}
 
+	// Initialize Docker Hub client if enabled
+	var dockerHubClient dockerhub.Client
+	if dockerHubEnabled {
+		setupLog.Info("Docker Hub integration enabled",
+			"cacheTTL", dockerHubCacheTTL,
+			"rateLimit", dockerHubRateLimit,
+			"rateBurst", dockerHubRateBurst)
+		baseDockerHubClient := dockerhub.NewHTTPClient()
+
+		// Wrap with caching and rate limiting
+		dockerHubClient = dockerhub.NewCachedRateLimitedClient(
+			baseDockerHubClient, dockerHubCacheTTL, dockerHubRateLimit, dockerHubRateBurst)
+	}
+
 	// Set up the Pod controller
 	podReconciler := &controller.PodReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		PyxisClient: pyxisClient,
-		Recorder:    mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		PyxisClient:     pyxisClient,
+		DockerHubClient: dockerHubClient,
+		Recorder:        mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
 	}
 
 	if err = podReconciler.SetupWithManager(mgr); err != nil {

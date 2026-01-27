@@ -32,13 +32,23 @@ spec:
     - jsonPath: .status.pyxisData.vulnerabilities.important
       name: Important
       type: integer
-    - jsonPath: .status.daysUntilEol
-      name: EOL-Days
+    - jsonPath: .status.dockerHubData.pullCountFormatted
+      name: Pulls
+      type: string
+    - jsonPath: .status.dockerHubData.daysSinceUpdate
+      name: Freshness
       type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     - jsonPath: .status.registryType
       name: Type
       priority: 1
       type: string
+    - jsonPath: .status.daysUntilEol
+      name: EOL-Days
+      priority: 1
+      type: integer
     - jsonPath: .status.pyxisData.releaseCategory
       name: Release
       priority: 1
@@ -46,9 +56,6 @@ spec:
     - jsonPath: .status.pyxisData.eolDate
       name: EOL
       priority: 1
-      type: date
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
       type: date
     name: v1alpha1
     schema:
@@ -108,6 +115,8 @@ spec:
                   (Certified, NotCertified, Pending, Unknown, Error)
                 enum:
                 - Certified
+                - Official
+                - Verified
                 - NotCertified
                 - Pending
                 - Unknown
@@ -178,6 +187,39 @@ spec:
                 description: DaysUntilEOL is the number of days until end-of-life
                   (negative if past EOL, nil if no EOL date)
                 type: integer
+              dockerHubData:
+                description: DockerHubData contains metadata from Docker Hub (only
+                  populated for docker.io images)
+                properties:
+                  daysSinceUpdate:
+                    description: DaysSinceUpdate is the computed days since the image
+                      was last updated
+                    type: integer
+                  isOfficialImage:
+                    description: IsOfficialImage is true if the image is a Docker
+                      Official Image (library namespace)
+                    type: boolean
+                  isVerifiedPublisher:
+                    description: IsVerifiedPublisher is true if the image is from
+                      a Docker Verified Publisher
+                    type: boolean
+                  lastUpdated:
+                    description: LastUpdated is when the image was last updated on
+                      Docker Hub
+                    format: date-time
+                    type: string
+                  pullCount:
+                    description: PullCount is the total number of pulls for this image
+                    format: int64
+                    type: integer
+                  pullCountFormatted:
+                    description: PullCountFormatted is human-readable pull count (e.g.,
+                      "12.7B", "434M")
+                    type: string
+                  starCount:
+                    description: StarCount is the number of stars on Docker Hub
+                    type: integer
+                type: object
               firstSeenAt:
                 description: FirstSeenAt is when this image was first observed in
                   the cluster
