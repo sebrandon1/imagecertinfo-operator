@@ -154,6 +154,46 @@ var (
 		},
 		[]string{"type", "reason"},
 	)
+
+	// Refresh Cycle Metrics
+
+	// RefreshCyclesTotal tracks completed refresh cycles
+	RefreshCyclesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "refresh_cycles_total",
+			Help:      "Total number of completed image refresh cycles",
+		},
+	)
+
+	// RefreshDurationSeconds tracks refresh cycle duration
+	RefreshDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: MetricsNamespace,
+			Name:      "refresh_duration_seconds",
+			Help:      "Duration of image refresh cycles in seconds",
+			Buckets:   []float64{1, 5, 10, 30, 60, 120, 300, 600},
+		},
+	)
+
+	// ImagesRefreshedTotal tracks individual images refreshed
+	ImagesRefreshedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "images_refreshed_total",
+			Help:      "Total number of individual images refreshed",
+		},
+	)
+
+	// CertificationStatusChangesTotal tracks certification status changes
+	CertificationStatusChangesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "certification_status_changes_total",
+			Help:      "Total number of certification status changes",
+		},
+		[]string{"from", "to"},
+	)
 )
 
 func init() {
@@ -175,6 +215,11 @@ func init() {
 		ImagesDiscovered,
 		// Event metrics
 		EventsEmitted,
+		// Refresh cycle metrics
+		RefreshCyclesTotal,
+		RefreshDurationSeconds,
+		ImagesRefreshedTotal,
+		CertificationStatusChangesTotal,
 	)
 }
 
@@ -203,4 +248,20 @@ func RecordReconcile(result string, durationSeconds float64, controller string) 
 // RecordEvent records an event emission
 func RecordEvent(eventType, reason string) {
 	EventsEmitted.WithLabelValues(eventType, reason).Inc()
+}
+
+// RecordRefreshCycle records a completed refresh cycle
+func RecordRefreshCycle(durationSeconds float64) {
+	RefreshCyclesTotal.Inc()
+	RefreshDurationSeconds.Observe(durationSeconds)
+}
+
+// RecordImageRefreshed records an individual image refresh
+func RecordImageRefreshed() {
+	ImagesRefreshedTotal.Inc()
+}
+
+// RecordCertificationStatusChange records a certification status change
+func RecordCertificationStatusChange(from, to string) {
+	CertificationStatusChangesTotal.WithLabelValues(from, to).Inc()
 }

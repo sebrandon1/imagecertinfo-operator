@@ -73,6 +73,7 @@ func main() {
 	var pyxisCacheTTL time.Duration
 	var pyxisRateLimit float64
 	var pyxisRateBurst int
+	var pyxisRefreshInterval time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -107,6 +108,8 @@ func main() {
 		"Rate limit for Pyxis API requests per second (default 10)")
 	flag.IntVar(&pyxisRateBurst, "pyxis-rate-burst", pyxis.DefaultRateBurst,
 		"Burst size for Pyxis API rate limiting (default 20)")
+	flag.DurationVar(&pyxisRefreshInterval, "pyxis-refresh-interval", 24*time.Hour,
+		"Interval for periodic refresh of Pyxis certification data (0 to disable, default 24h)")
 
 	opts := zap.Options{
 		Development: true,
@@ -254,6 +257,12 @@ func main() {
 	// Start cache cleanup loop if using cached client
 	if cachedClient, ok := pyxisClient.(*pyxis.CachedClient); ok {
 		cachedClient.StartCleanupLoop(ctx, pyxisCacheTTL/2)
+	}
+
+	// Start the periodic refresh loop for Pyxis data
+	if pyxisRefreshInterval > 0 && pyxisClient != nil {
+		setupLog.Info("Starting Pyxis refresh loop", "interval", pyxisRefreshInterval)
+		podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
 	}
 
 	// +kubebuilder:scaffold:builder

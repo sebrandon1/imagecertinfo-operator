@@ -440,3 +440,336 @@ func TestPodReconciler_StartCleanupLoop(t *testing.T) {
 	// Give time for goroutine to exit
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestPodReconciler_RefreshAllImages(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	// Create ImageCertificationInfo for a Red Hat image (should be refreshed)
+	oldCheckTime := metav1.NewTime(time.Now().Add(-2 * time.Hour)) // Checked 2 hours ago
+	redHatCR := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "registry.redhat.io.ubi9.ubi.abc12345",
+		},
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        "sha256:abc12345abc12345abc12345abc12345abc12345abc12345abc12345abc12345",
+			FullImageReference: "registry.redhat.io/ubi9/ubi@sha256:abc12345",
+			Registry:           "registry.redhat.io",
+			Repository:         "ubi9/ubi",
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			LastPyxisCheckAt:    &oldCheckTime,
+		},
+	}
+
+	// Create ImageCertificationInfo for a non-Red Hat image (should be skipped)
+	dockerCR := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "docker.io.library.nginx.def67890",
+		},
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        "sha256:def67890def67890def67890def67890def67890def67890def67890def67890",
+			FullImageReference: "docker.io/library/nginx@sha256:def67890",
+			Registry:           "docker.io",
+			Repository:         "library/nginx",
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeCommunity,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+		},
+	}
+
+	// Create a Red Hat CR that was recently checked (should be skipped)
+	recentCheckTime := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	recentCR := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "registry.redhat.io.ubi8.ubi.recent123",
+		},
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        "sha256:recent123recent123recent123recent123recent123recent123recent123re",
+			FullImageReference: "registry.redhat.io/ubi8/ubi@sha256:recent123",
+			Registry:           "registry.redhat.io",
+			Repository:         "ubi8/ubi",
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+			LastPyxisCheckAt:    &recentCheckTime,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(redHatCR, dockerCR, recentCR).
+		WithStatusSubresource(redHatCR, dockerCR, recentCR).
+		Build()
+
+	mockPyxis := &MockPyxisClient{
+		CertData: &pyxis.CertificationData{
+			ProjectID:   "ubi9-ubi",
+			Publisher:   "Red Hat, Inc.",
+			HealthIndex: "A",
+		},
+		Healthy: true,
+	}
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: mockPyxis,
+	}
+
+	// Run refresh
+	err := reconciler.RefreshAllImages(ctx)
+	if err != nil {
+		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+
+	// Verify the Red Hat CR that needed refresh was updated
+	var updatedRedHatCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "registry.redhat.io.ubi9.ubi.abc12345"}, &updatedRedHatCR); err != nil {
+		t.Fatalf("Failed to get refreshed ImageCertificationInfo: %v", err)
+	}
+
+	// Should be certified now
+	if updatedRedHatCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusCertified {
+		t.Errorf("CertificationStatus = %v, want Certified", updatedRedHatCR.Status.CertificationStatus)
+	}
+
+	// LastPyxisCheckAt should be updated (more recent than the old check time)
+	if updatedRedHatCR.Status.LastPyxisCheckAt == nil ||
+		!updatedRedHatCR.Status.LastPyxisCheckAt.After(oldCheckTime.Time) {
+		t.Error("LastPyxisCheckAt should be updated after refresh")
+	}
+
+	// Docker CR should be unchanged (not a Red Hat registry)
+	var unchangedDockerCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "docker.io.library.nginx.def67890"}, &unchangedDockerCR); err != nil {
+		t.Fatalf("Failed to get Docker ImageCertificationInfo: %v", err)
+	}
+	if unchangedDockerCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusUnknown {
+		t.Errorf("Docker CR should remain Unknown, got %v", unchangedDockerCR.Status.CertificationStatus)
+	}
+
+	// Recently checked CR should not have been updated (staggering)
+	var unchangedRecentCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: "registry.redhat.io.ubi8.ubi.recent123"}, &unchangedRecentCR); err != nil {
+		t.Fatalf("Failed to get recent ImageCertificationInfo: %v", err)
+	}
+	// LastPyxisCheckAt should still be approximately the original time (within a second)
+	if unchangedRecentCR.Status.LastPyxisCheckAt == nil {
+		t.Error("LastPyxisCheckAt should not be nil")
+	} else {
+		timeDiff := unchangedRecentCR.Status.LastPyxisCheckAt.Sub(recentCheckTime.Time)
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		if timeDiff > time.Second {
+			t.Errorf("Recently checked CR should not be refreshed within the hour, time diff: %v", timeDiff)
+		}
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testCRName,
+		},
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           "registry.redhat.io",
+			Repository:         "ubi8/ubi",
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			FirstSeenAt:         &now,
+			LastSeenAt:          &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	mockPyxis := &MockPyxisClient{
+		CertData: &pyxis.CertificationData{
+			ProjectID:   "ubi8-container",
+			Publisher:   "Red Hat, Inc.",
+			HealthIndex: "B",
+			Vulnerabilities: &pyxis.VulnerabilitySummary{
+				Critical:  1,
+				Important: 3,
+				Moderate:  5,
+				Low:       10,
+			},
+		},
+		Healthy: true,
+	}
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: mockPyxis,
+	}
+
+	// Refresh the image
+	err := reconciler.refreshSingleImage(ctx, cr)
+	if err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	// Verify the CR was updated
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {
+		t.Fatalf("Failed to get refreshed ImageCertificationInfo: %v", err)
+	}
+
+	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusCertified {
+		t.Errorf("CertificationStatus = %v, want Certified", updatedCR.Status.CertificationStatus)
+	}
+
+	if updatedCR.Status.PyxisData == nil {
+		t.Fatal("PyxisData should not be nil")
+	}
+
+	if updatedCR.Status.PyxisData.Publisher != "Red Hat, Inc." {
+		t.Errorf("Publisher = %v, want Red Hat, Inc.", updatedCR.Status.PyxisData.Publisher)
+	}
+
+	if updatedCR.Status.PyxisData.HealthIndex != "B" {
+		t.Errorf("HealthIndex = %v, want B", updatedCR.Status.PyxisData.HealthIndex)
+	}
+
+	if updatedCR.Status.PyxisData.Vulnerabilities == nil {
+		t.Fatal("Vulnerabilities should not be nil")
+	}
+
+	if updatedCR.Status.PyxisData.Vulnerabilities.Critical != 1 {
+		t.Errorf("Critical vulnerabilities = %v, want 1", updatedCR.Status.PyxisData.Vulnerabilities.Critical)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_NotCertified(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testCRName,
+		},
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           "registry.redhat.io",
+			Repository:         "ubi8/ubi",
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+			FirstSeenAt:         &now,
+			LastSeenAt:          &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	// Mock Pyxis returns nil (not certified)
+	mockPyxis := &MockPyxisClient{
+		CertData: nil,
+		Healthy:  true,
+	}
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: mockPyxis,
+	}
+
+	// Refresh the image
+	err := reconciler.refreshSingleImage(ctx, cr)
+	if err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	// Verify the CR status changed to NotCertified
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {
+		t.Fatalf("Failed to get refreshed ImageCertificationInfo: %v", err)
+	}
+
+	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusNotCertified {
+		t.Errorf("CertificationStatus = %v, want NotCertified", updatedCR.Status.CertificationStatus)
+	}
+}
+
+func TestIsHealthDegraded(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldGrade string
+		newGrade string
+		want     bool
+	}{
+		{"A to B is degraded", "A", "B", true},
+		{"A to C is degraded", "A", "C", true},
+		{"A to F is degraded", "A", "F", true},
+		{"B to A is not degraded", "B", "A", false},
+		{"B to B is not degraded", "B", "B", false},
+		{"C to D is degraded", "C", "D", true},
+		{"F to A is not degraded", "F", "A", false},
+		{"empty old grade is not degraded", "", "B", false},
+		{"empty new grade is not degraded", "A", "", false},
+		{"invalid grades are not degraded", "X", "Y", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isHealthDegraded(tt.oldGrade, tt.newGrade)
+			if got != tt.want {
+				t.Errorf("isHealthDegraded(%q, %q) = %v, want %v", tt.oldGrade, tt.newGrade, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_StartRefreshLoop(t *testing.T) {
+	scheme := newTestScheme()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start refresh loop - note: it has a random startup delay (0-5 min)
+	// so we can't easily test the actual refresh, just that it starts and stops
+	reconciler.StartRefreshLoop(ctx, 1*time.Hour)
+
+	// Give some time for the goroutine to start
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel context to stop the loop
+	cancel()
+
+	// Give time for goroutine to exit
+	time.Sleep(50 * time.Millisecond)
+}
