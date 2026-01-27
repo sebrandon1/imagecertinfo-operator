@@ -90,6 +90,13 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# CLUSTER_TYPE can be set to "kubernetes" or "openshift" for nightly tests
+CLUSTER_TYPE ?= kubernetes
+
+.PHONY: test-e2e-nightly
+test-e2e-nightly: manifests generate fmt vet ## Run nightly e2e tests with certification verification. Expects a running cluster.
+	CLUSTER_TYPE=$(CLUSTER_TYPE) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="Nightly || Certification" -timeout 10m
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
