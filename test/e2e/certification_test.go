@@ -35,6 +35,9 @@ import (
 // testNamespace is where test pods are deployed
 const testNamespace = "certification-test"
 
+// operatorNamespace is where the operator is deployed
+const operatorNamespace = "imagecertinfo-operator-system"
+
 // certifiedImage is a known Red Hat certified image (using public registry that doesn't require auth)
 const certifiedImage = "registry.access.redhat.com/ubi9/ubi-minimal:latest"
 
@@ -43,12 +46,42 @@ const nonCertifiedImage = "docker.io/library/nginx:alpine"
 
 var _ = Describe("Image Certification Detection", Label("Nightly", "Certification"), Ordered, func() {
 	BeforeAll(func() {
-		By("creating test namespace")
-		cmd := exec.Command("kubectl", "create", "ns", testNamespace)
+		By("creating operator namespace")
+		cmd := exec.Command("kubectl", "create", "ns", operatorNamespace)
+		_, _ = utils.Run(cmd) // Ignore error if namespace already exists
+
+		By("labeling the operator namespace to enforce the restricted security policy")
+		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", operatorNamespace,
+			"pod-security.kubernetes.io/enforce=restricted")
+		_, _ = utils.Run(cmd)
+
+		By("installing CRDs")
+		cmd = exec.Command("make", "install")
 		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
+
+		By("deploying the controller-manager")
+		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		By("waiting for controller-manager to be ready")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "deployment",
+				"imagecertinfo-operator-controller-manager",
+				"-n", operatorNamespace,
+				"-o", "jsonpath={.status.availableReplicas}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(Equal("1"), "Controller manager not ready")
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("creating test namespace")
+		cmd = exec.Command("kubectl", "create", "ns", testNamespace)
+		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create test namespace")
 
-		By("labeling the namespace to enforce the restricted security policy")
+		By("labeling the test namespace to enforce the restricted security policy")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", testNamespace,
 			"pod-security.kubernetes.io/enforce=restricted")
 		_, _ = utils.Run(cmd) // Ignore error, may not be supported on all clusters
@@ -57,6 +90,18 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 	AfterAll(func() {
 		By("cleaning up test namespace")
 		cmd := exec.Command("kubectl", "delete", "ns", testNamespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("undeploying the controller-manager")
+		cmd = exec.Command("make", "undeploy")
+		_, _ = utils.Run(cmd)
+
+		By("uninstalling CRDs")
+		cmd = exec.Command("make", "uninstall")
+		_, _ = utils.Run(cmd)
+
+		By("removing operator namespace")
+		cmd = exec.Command("kubectl", "delete", "ns", operatorNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 	})
 

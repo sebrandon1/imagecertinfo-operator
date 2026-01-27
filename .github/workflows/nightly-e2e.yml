@@ -71,7 +71,8 @@ jobs:
       - name: Create OpenShift cluster
         uses: palmsoftware/quick-ocp@v0.0.1
         with:
-          pull-secret: ${{ secrets.OPENSHIFT_PULL_SECRET }}
+          pull-secret: ${{ secrets.PULL_SECRET }}
+          ocp-version: "4.20"
 
       - name: Build operator image
         run: |
