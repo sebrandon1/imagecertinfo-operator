@@ -1,7 +1,14 @@
-# ImageCertInfo Operator
+# ImageCertInfo Operator for OpenShift
 
-Automatically discover, inventory, and track container image certifications
-and security metadata across your Kubernetes cluster.
+![Tests](https://github.com/sebrandon1/imagecertinfo-operator/actions/workflows/test.yml/badge.svg)
+![Lint](https://github.com/sebrandon1/imagecertinfo-operator/actions/workflows/lint.yml/badge.svg)
+![E2E Tests](https://github.com/sebrandon1/imagecertinfo-operator/actions/workflows/test-e2e.yml/badge.svg)
+![Build](https://github.com/sebrandon1/imagecertinfo-operator/actions/workflows/build-push.yml/badge.svg)
+[![Go Report Card](https://goreportcard.com/badge/github.com/sebrandon1/imagecertinfo-operator)](https://goreportcard.com/report/github.com/sebrandon1/imagecertinfo-operator)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
+
+Automatically discover, inventory, and track Red Hat certified container images
+across your OpenShift or Kubernetes cluster.
 
 ## Overview
 
@@ -22,6 +29,36 @@ track which workloads are using vulnerable, uncertified, or end-of-life images.*
 - **Lifecycle Awareness**: Monitors EOL dates, release categories, and replacement images
 - **Multi-Architecture Support**: Tracks supported architectures (amd64, arm64, s390x, ppc64le)
 - **Zero Configuration**: Works without authentication for public Pyxis API access
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Cluster
+        A[Pod Controller] -->|watches| B[Pods]
+        B -->|extract images| C[Image Parser]
+    end
+
+    C -->|query| D[Pyxis API Client]
+    D -->|cache| E[Response Cache]
+    D -->|rate limit| F[Red Hat Pyxis API]
+
+    A -->|create/update| G[ImageCertificationInfo CR]
+
+    subgraph Metrics
+        H[Prometheus Metrics]
+    end
+
+    A -->|emit| H
+    D -->|emit| H
+```
+
+**Flow:**
+1. **Pod Controller** watches all pods cluster-wide for create/update/delete events
+2. **Image Parser** extracts and normalizes container image references from pod specs
+3. **Pyxis Client** queries Red Hat's Pyxis API with caching and rate limiting
+4. **ImageCertificationInfo CR** is created/updated with certification data and pod references
+5. **Metrics** are emitted for monitoring via Prometheus
 
 ## How It Differs from Red Hat ACS
 
@@ -66,6 +103,50 @@ make docker-build docker-push IMG=quay.io/bapalm/imagecertinfo-operator:latest
 # Install CRDs and deploy
 make install
 make deploy IMG=quay.io/bapalm/imagecertinfo-operator:latest
+```
+
+## OpenShift Installation
+
+### Using oc CLI
+
+```bash
+# Apply the installation manifest
+oc apply -f https://raw.githubusercontent.com/sebrandon1/imagecertinfo-operator/main/dist/install.yaml
+
+# Verify deployment
+oc get pods -n imagecertinfo-operator-system
+```
+
+### SecurityContextConstraints
+
+The operator runs with minimal privileges. If your cluster has restrictive SCCs,
+the default `restricted` SCC should work. For clusters requiring explicit SCC
+assignment:
+
+```bash
+# The operator uses the default service account
+oc adm policy add-scc-to-user restricted -z imagecertinfo-controller-manager -n imagecertinfo-operator-system
+```
+
+### OpenShift Monitoring Integration
+
+To enable metrics scraping with OpenShift's built-in monitoring:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: imagecertinfo-operator
+  namespace: imagecertinfo-operator-system
+spec:
+  endpoints:
+  - port: https
+    scheme: https
+    tlsConfig:
+      insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: controller-manager
 ```
 
 ## Usage Examples
@@ -179,6 +260,129 @@ The operator can be configured via command-line flags:
 | `--metrics-bind-address` | Address for metrics endpoint | `0` |
 | `--health-probe-bind-address` | Address for health probes | `:8081` |
 | `--leader-elect` | Enable leader election for HA | `false` |
+
+## Prometheus Metrics
+
+The operator exposes metrics at the `/metrics` endpoint. All metrics use the `imagecertinfo_` prefix.
+
+### Image Inventory Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_images_total` | Gauge | `status` | Total images tracked by certification status |
+| `imagecertinfo_images_by_health` | Gauge | `grade` | Images by health grade (A-F) |
+| `imagecertinfo_vulnerabilities_total` | Gauge | `severity` | Total vulnerabilities by severity |
+| `imagecertinfo_images_eol_within_days` | Gauge | `days` | Images approaching end-of-life |
+| `imagecertinfo_images_past_eol` | Gauge | - | Images past their EOL date |
+
+### Pyxis API Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_pyxis_requests_total` | Counter | `status`, `endpoint` | Total Pyxis API requests |
+| `imagecertinfo_pyxis_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
+| `imagecertinfo_pyxis_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
+
+### Reconciliation Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_reconcile_total` | Counter | `result` | Reconciliation attempts (success/error/requeue) |
+| `imagecertinfo_reconcile_duration_seconds` | Histogram | `controller` | Reconciliation duration |
+| `imagecertinfo_images_discovered_total` | Counter | - | New images discovered |
+
+### Event Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_events_emitted_total` | Counter | `type`, `reason` | Kubernetes events emitted |
+
+### Refresh Cycle Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_refresh_cycles_total` | Counter | - | Completed refresh cycles |
+| `imagecertinfo_refresh_duration_seconds` | Histogram | - | Refresh cycle duration |
+| `imagecertinfo_images_refreshed_total` | Counter | - | Individual images refreshed |
+| `imagecertinfo_certification_status_changes_total` | Counter | `from`, `to` | Certification status changes |
+
+### Example PromQL Queries
+
+```promql
+# Percentage of certified images
+sum(imagecertinfo_images_total{status="Certified"}) / sum(imagecertinfo_images_total) * 100
+
+# Images with critical vulnerabilities
+imagecertinfo_vulnerabilities_total{severity="critical"}
+
+# Pyxis API cache hit rate
+sum(rate(imagecertinfo_pyxis_cache_hits_total{result="hit"}[5m])) /
+sum(rate(imagecertinfo_pyxis_cache_hits_total[5m])) * 100
+
+# Reconciliation error rate
+sum(rate(imagecertinfo_reconcile_total{result="error"}[5m])) /
+sum(rate(imagecertinfo_reconcile_total[5m])) * 100
+```
+
+## Troubleshooting
+
+### Pyxis API Errors
+
+**Symptoms:** Images show `Unknown` certification status, Pyxis-related errors in logs.
+
+**Solutions:**
+1. Check network connectivity to `catalog.redhat.com`:
+   ```bash
+   kubectl exec -it deploy/imagecertinfo-controller-manager -n imagecertinfo-operator-system -- curl -I https://catalog.redhat.com
+   ```
+2. Verify rate limiting isn't being triggered (check `imagecertinfo_pyxis_requests_total{status="429"}`)
+3. Consider adding a Pyxis API key for higher rate limits via `--pyxis-api-key`
+
+### No Images Being Discovered
+
+**Symptoms:** No `ImageCertificationInfo` resources created.
+
+**Solutions:**
+1. Verify pods are running in the cluster:
+   ```bash
+   kubectl get pods --all-namespaces
+   ```
+2. Check controller logs for errors:
+   ```bash
+   kubectl logs -l control-plane=controller-manager -n imagecertinfo-operator-system
+   ```
+3. Ensure the operator has RBAC permissions to list pods cluster-wide
+
+### Stale Pod References
+
+**Symptoms:** `ImageCertificationInfo` resources list pods that no longer exist.
+
+**Solutions:**
+1. The cleanup loop runs every 5 minutes by default. Wait for the next cycle.
+2. Adjust cleanup interval if needed: `--cleanup-interval=1m`
+3. Check that the cleanup loop is running in logs
+
+### Metrics Not Appearing
+
+**Symptoms:** Prometheus scraping shows no `imagecertinfo_*` metrics.
+
+**Solutions:**
+1. Verify the metrics endpoint is enabled (`--metrics-bind-address` is not `0`):
+   ```bash
+   kubectl port-forward svc/imagecertinfo-controller-manager-metrics-service -n imagecertinfo-operator-system 8443:8443
+   curl -k https://localhost:8443/metrics
+   ```
+2. Check ServiceMonitor/PodMonitor configuration matches the service labels
+3. Verify Prometheus has permissions to scrape the namespace
+
+### High Memory Usage
+
+**Symptoms:** Operator pod OOMKilled or using excessive memory.
+
+**Solutions:**
+1. Reduce cache TTL to limit cached responses: `--pyxis-cache-ttl=30m`
+2. Increase rate limiting to slow API requests: `--pyxis-rate-limit=5`
+3. Check if cluster has an unusually high number of unique images
 
 ## Contributing
 
