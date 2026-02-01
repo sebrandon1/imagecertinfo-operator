@@ -75,24 +75,35 @@ jobs:
   e2e-openshift:
     name: E2E Tests on OpenShift
     runs-on: ubuntu-latest
-    # Only run if PULL_SECRET is available (required for CRC)
-    if: ${{ secrets.PULL_SECRET != '' }}
     steps:
+      - name: Check for PULL_SECRET
+        env:
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
+        run: |
+          if [ -z "$PULL_SECRET" ]; then
+            echo "::notice::PULL_SECRET not configured, skipping OpenShift tests"
+            echo "SKIP_OCP=true" >> $GITHUB_ENV
+          fi
+
       - name: Clone the code
+        if: ${{ env.SKIP_OCP != 'true' }}
         uses: actions/checkout@v6
 
       - name: Setup Go
+        if: ${{ env.SKIP_OCP != 'true' }}
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Create OpenShift cluster
+        if: ${{ env.SKIP_OCP != 'true' }}
         uses: palmsoftware/quick-ocp@v0.0.24
         with:
           ocpPullSecret: ${{ secrets.PULL_SECRET }}
           desiredOCPVersion: "4.20"
 
       - name: Setup OpenShift internal registry access
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           # Expose the internal registry
           oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
@@ -109,30 +120,35 @@ jobs:
           oc whoami -t | docker login ${REGISTRY_HOST} -u $(oc whoami) --password-stdin
 
       - name: Build operator image
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           make docker-build IMG=${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Push to OpenShift registry
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           # Create the namespace first so we can push to it
           oc create namespace imagecertinfo-operator-system --dry-run=client -o yaml | oc apply -f -
           docker push ${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Deploy operator
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           # Use the internal registry reference for the deployment
           make deploy IMG=image-registry.openshift-image-registry.svc:5000/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Wait for operator readiness
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           kubectl wait --for=condition=available --timeout=180s deployment/imagecertinfo-operator-controller-manager -n imagecertinfo-operator-system
 
       - name: Run nightly e2e tests
+        if: ${{ env.SKIP_OCP != 'true' }}
         run: |
           make test-e2e-nightly CLUSTER_TYPE=openshift
 
       - name: Collect logs on failure
-        if: failure()
+        if: ${{ failure() && env.SKIP_OCP != 'true' }}
         run: |
           echo "=== Controller Manager Logs ==="
           kubectl logs -n imagecertinfo-operator-system -l control-plane=controller-manager --tail=200 || true
