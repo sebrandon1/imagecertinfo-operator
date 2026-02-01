@@ -75,6 +75,8 @@ jobs:
   e2e-openshift:
     name: E2E Tests on OpenShift
     runs-on: ubuntu-latest
+    # Only run if PULL_SECRET is available (required for CRC)
+    if: ${{ secrets.PULL_SECRET != '' }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v6
