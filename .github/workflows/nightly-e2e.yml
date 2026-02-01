@@ -23,6 +23,8 @@ jobs:
         with:
           numControlPlaneNodes: 1
           numWorkerNodes: 1
+          installLocalRegistry: 'true'
+          localRegistryPort: '5000'
 
       - name: Build operator image
         run: |
@@ -71,20 +73,39 @@ jobs:
       - name: Create OpenShift cluster
         uses: palmsoftware/quick-ocp@v0.0.24
         with:
-          pull-secret: ${{ secrets.PULL_SECRET }}
-          ocp-version: "4.20"
+          ocpPullSecret: ${{ secrets.PULL_SECRET }}
+          desiredOCPVersion: "4.20"
+
+      - name: Setup OpenShift internal registry access
+        run: |
+          # Expose the internal registry
+          oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
+          # Wait for the route to be available
+          sleep 15
+          # Get the registry route
+          REGISTRY_HOST=$(oc get route default-route -n openshift-image-registry --template='{{ .spec.host }}')
+          echo "REGISTRY_HOST=${REGISTRY_HOST}" >> $GITHUB_ENV
+          # Configure Docker to trust the insecure registry
+          echo "{\"insecure-registries\": [\"${REGISTRY_HOST}\"]}" | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sleep 5
+          # Login to the internal registry
+          oc whoami -t | docker login ${REGISTRY_HOST} -u $(oc whoami) --password-stdin
 
       - name: Build operator image
         run: |
-          make docker-build IMG=localhost:5000/imagecertinfo-operator:test
+          make docker-build IMG=${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
 
-      - name: Push to local registry
+      - name: Push to OpenShift registry
         run: |
-          docker push localhost:5000/imagecertinfo-operator:test
+          # Create the namespace first so we can push to it
+          oc create namespace imagecertinfo-operator-system --dry-run=client -o yaml | oc apply -f -
+          docker push ${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Deploy operator
         run: |
-          make deploy IMG=localhost:5000/imagecertinfo-operator:test
+          # Use the internal registry reference for the deployment
+          make deploy IMG=image-registry.openshift-image-registry.svc:5000/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Wait for operator readiness
         run: |
