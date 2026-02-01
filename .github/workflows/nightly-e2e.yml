@@ -26,6 +26,19 @@ jobs:
           installLocalRegistry: 'true'
           localRegistryPort: '5001'
 
+      - name: Configure containerd for insecure registry
+        run: |
+          # Configure Kind nodes to use HTTP for the local registry
+          REGISTRY_DIR="/etc/containerd/certs.d/quick-k8s-registry:5000"
+          for node in $(kind get nodes --name kind); do
+            docker exec "${node}" mkdir -p "${REGISTRY_DIR}"
+            cat <<EOF | docker exec -i "${node}" cp /dev/stdin "${REGISTRY_DIR}/hosts.toml"
+          [host."http://quick-k8s-registry:5000"]
+            capabilities = ["pull", "resolve", "push"]
+            skip_verify = true
+          EOF
+          done
+
       - name: Build operator image
         run: |
           make docker-build IMG=localhost:5001/imagecertinfo-operator:test
@@ -33,10 +46,14 @@ jobs:
       - name: Push to local registry
         run: |
           docker push localhost:5001/imagecertinfo-operator:test
+          # Also tag and push with cluster-accessible name
+          docker tag localhost:5001/imagecertinfo-operator:test quick-k8s-registry:5000/imagecertinfo-operator:test
+          docker push quick-k8s-registry:5000/imagecertinfo-operator:test
 
       - name: Deploy operator
         run: |
-          make deploy IMG=localhost:5001/imagecertinfo-operator:test
+          # Use registry container name:5000 for cluster-internal access
+          make deploy IMG=quick-k8s-registry:5000/imagecertinfo-operator:test
 
       - name: Wait for operator readiness
         run: |
