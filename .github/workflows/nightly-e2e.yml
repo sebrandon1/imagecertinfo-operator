@@ -34,6 +34,16 @@ jobs:
           sleep 5
           # Verify registry is running
           curl -s http://localhost:5000/v2/ || echo "Registry check"
+          # Configure Kind nodes to use insecure registry
+          REGISTRY_DIR="/etc/containerd/certs.d/registry:5000"
+          for node in $(kind get nodes --name kind); do
+            docker exec "${node}" mkdir -p "${REGISTRY_DIR}"
+            cat <<EOF | docker exec -i "${node}" cp /dev/stdin "${REGISTRY_DIR}/hosts.toml"
+          [host."http://registry:5000"]
+            capabilities = ["pull", "resolve", "push"]
+            skip_verify = true
+          EOF
+          done
 
       - name: Build operator image
         run: |
