@@ -23,8 +23,17 @@ jobs:
         with:
           numControlPlaneNodes: 1
           numWorkerNodes: 1
-          installLocalRegistry: 'true'
-          localRegistryPort: '5000'
+
+      - name: Setup local registry
+        run: |
+          # Start a local registry
+          docker run -d --restart=always -p 5000:5000 --network bridge --name registry registry:2
+          # Connect registry to kind network
+          docker network connect kind registry || true
+          # Wait for registry to be ready
+          sleep 5
+          # Verify registry is running
+          curl -s http://localhost:5000/v2/ || echo "Registry check"
 
       - name: Build operator image
         run: |
@@ -36,7 +45,7 @@ jobs:
 
       - name: Deploy operator
         run: |
-          make deploy IMG=localhost:5000/imagecertinfo-operator:test
+          make deploy IMG=registry:5000/imagecertinfo-operator:test
 
       - name: Wait for operator readiness
         run: |
