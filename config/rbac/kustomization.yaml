@@ -25,4 +25,6 @@ resources:
 - imagecertificationinfo_admin_role.yaml
 - imagecertificationinfo_editor_role.yaml
 - imagecertificationinfo_viewer_role.yaml
+# Role for reading the Pyxis API key from a Secret
+- pyxis_secret_role.yaml
 
