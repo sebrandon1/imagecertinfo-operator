@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -30,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -40,6 +42,7 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/secrets"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -81,6 +84,11 @@ func main() {
 	var dockerHubCacheTTL time.Duration
 	var dockerHubRateLimit float64
 	var dockerHubRateBurst int
+
+	// Pyxis API key secret configuration flags
+	var pyxisAPIKeySecretName string
+	var pyxisAPIKeySecretNamespace string
+	var pyxisAPIKeySecretKey string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -128,6 +136,14 @@ func main() {
 	flag.IntVar(&dockerHubRateBurst, "dockerhub-rate-burst", dockerhub.DefaultRateBurst,
 		"Burst size for Docker Hub API rate limiting (default 10)")
 
+	// Pyxis API key secret flags
+	flag.StringVar(&pyxisAPIKeySecretName, "pyxis-api-key-secret-name", "",
+		"Name of the Kubernetes Secret containing the Pyxis API key")
+	flag.StringVar(&pyxisAPIKeySecretNamespace, "pyxis-api-key-secret-namespace", "",
+		"Namespace of the Kubernetes Secret containing the Pyxis API key (defaults to POD_NAMESPACE env var)")
+	flag.StringVar(&pyxisAPIKeySecretKey, "pyxis-api-key-secret-key", "api-key",
+		"Key within the Secret that contains the Pyxis API key (default: api-key)")
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -136,9 +152,15 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	// Priority order for Pyxis API key: flag > env var > Secret
 	// Check for API key in environment variable if not set via flag
 	if pyxisAPIKey == "" {
 		pyxisAPIKey = os.Getenv("PYXIS_API_KEY")
+	}
+
+	// Determine secret namespace from flag or POD_NAMESPACE env var
+	if pyxisAPIKeySecretNamespace == "" {
+		pyxisAPIKeySecretNamespace = os.Getenv("POD_NAMESPACE")
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
@@ -230,6 +252,35 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	// Read Pyxis API key from Secret if not already set and secret name is provided
+	if pyxisAPIKey == "" && pyxisAPIKeySecretName != "" {
+		setupLog.Info("Reading Pyxis API key from Secret",
+			"secretName", pyxisAPIKeySecretName,
+			"secretNamespace", pyxisAPIKeySecretNamespace,
+			"secretKey", pyxisAPIKeySecretKey)
+
+		// Create a client for reading the secret
+		secretClient, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create client for reading secret")
+			os.Exit(1)
+		}
+
+		secretReader := secrets.NewSecretReader(secretClient)
+		apiKey, err := secretReader.ReadAPIKey(
+			context.Background(),
+			pyxisAPIKeySecretNamespace,
+			pyxisAPIKeySecretName,
+			pyxisAPIKeySecretKey,
+		)
+		if err != nil {
+			setupLog.Error(err, "failed to read Pyxis API key from Secret")
+			os.Exit(1)
+		}
+		pyxisAPIKey = apiKey
+		setupLog.Info("Successfully read Pyxis API key from Secret")
 	}
 
 	// Initialize Pyxis client if enabled

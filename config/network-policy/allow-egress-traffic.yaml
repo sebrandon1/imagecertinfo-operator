@@ -1,0 +1,44 @@
+# This NetworkPolicy restricts egress traffic from the controller manager
+# to only allow necessary external connections:
+# - DNS resolution (kube-system, port 53)
+# - Kubernetes API (ports 443, 6443)
+# - External HTTPS (port 443) for Pyxis and Docker Hub APIs
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: imagecertinfo-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-egress-traffic
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: imagecertinfo-operator
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS resolution to kube-system namespace
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow access to Kubernetes API server
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # Note: The above rule allows HTTPS to any IP. For stricter security,
+    # you can restrict to specific CIDR ranges for Pyxis (catalog.redhat.com)
+    # and Docker Hub (hub.docker.com) APIs. However, these IPs may change,
+    # so we allow general HTTPS egress for external API access.
