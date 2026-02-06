@@ -3,7 +3,7 @@ module github.com/sebrandon1/imagecertinfo-operator
 go 1.25.3
 
 require (
-	github.com/onsi/ginkgo/v2 v2.28.0
+	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/time v0.14.0
