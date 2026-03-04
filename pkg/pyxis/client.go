@@ -23,10 +23,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"time"
 
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 )
 
 const (
@@ -227,7 +227,7 @@ func (c *HTTPClient) isFromRedHatRegistry(pyxisResp *PyxisImageResponse) bool {
 		return true // No repos, assume valid
 	}
 	for _, repo := range pyxisResp.Repositories {
-		if isRedHatRegistry(repo.Registry) {
+		if image.IsRedHatRegistry(repo.Registry) {
 			return true
 		}
 	}
@@ -483,16 +483,6 @@ func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, image
 	}
 
 	return cves, advisoryIDs
-}
-
-// isRedHatRegistry checks if the registry is a Red Hat registry
-func isRedHatRegistry(registry string) bool {
-	redHatRegistries := []string{
-		"registry.redhat.io",
-		"registry.access.redhat.com",
-		"registry.connect.redhat.com",
-	}
-	return slices.Contains(redHatRegistries, registry)
 }
 
 // IsHealthy checks if the Pyxis API is accessible

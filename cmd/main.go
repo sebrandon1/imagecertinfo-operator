@@ -230,7 +230,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -262,7 +263,7 @@ func main() {
 			"secretKey", pyxisAPIKeySecretKey)
 
 		// Create a client for reading the secret
-		secretClient, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+		secretClient, err := client.New(restConfig, client.Options{Scheme: scheme})
 		if err != nil {
 			setupLog.Error(err, "unable to create client for reading secret")
 			os.Exit(1)
@@ -337,9 +338,12 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 	podReconciler.StartCleanupLoop(ctx, cleanupInterval)
 
-	// Start cache cleanup loop if using cached client
+	// Start cache cleanup loops if using cached clients
 	if cachedClient, ok := pyxisClient.(*pyxis.CachedClient); ok {
 		cachedClient.StartCleanupLoop(ctx, pyxisCacheTTL/2)
+	}
+	if cachedClient, ok := dockerHubClient.(*dockerhub.CachedClient); ok {
+		cachedClient.StartCleanupLoop(ctx, dockerHubCacheTTL/2)
 	}
 
 	// Start the periodic refresh loop for Pyxis data
