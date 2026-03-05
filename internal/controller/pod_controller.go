@@ -53,6 +53,14 @@ const (
 	RegistryDockerHub = "docker.io"
 )
 
+// Annotation keys
+const (
+	AnnotationCVEs = "security.telco.openshift.io/cves"
+)
+
+// gradeOrder maps health grades to numeric values for comparison
+var gradeOrder = map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
+
 // PodReconciler reconciles a Pod object and creates/updates ImageCertificationInfo resources
 type PodReconciler struct {
 	client.Client
@@ -94,7 +102,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Process all container statuses (including init containers)
-	allStatuses := append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...)
+	allStatuses := make([]corev1.ContainerStatus, 0, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
+	allStatuses = append(allStatuses, pod.Status.ContainerStatuses...)
+	allStatuses = append(allStatuses, pod.Status.InitContainerStatuses...)
 
 	for _, containerStatus := range allStatuses {
 		if containerStatus.ImageID == "" {
@@ -245,6 +255,22 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 
 	// Query Pyxis
 	certData, err := r.PyxisClient.GetImageCertification(ctx, ref.Registry, ref.Repository, ref.Digest)
+	if err != nil {
+		logger.Error(err, "failed to query Pyxis API")
+		// Still try to update status to reflect the error
+		var cr securityv1alpha1.ImageCertificationInfo
+		if getErr := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); getErr != nil {
+			logger.Error(getErr, "failed to get ImageCertificationInfo for Pyxis error update")
+			return
+		}
+		now := metav1.Now()
+		cr.Status.LastPyxisCheckAt = &now
+		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusError
+		if updateErr := r.Status().Update(ctx, &cr); updateErr != nil {
+			logger.Error(updateErr, "failed to update status after Pyxis error")
+		}
+		return
+	}
 
 	// Fetch the latest version of the CR
 	var cr securityv1alpha1.ImageCertificationInfo
@@ -255,16 +281,6 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 
 	now := metav1.Now()
 	cr.Status.LastPyxisCheckAt = &now
-
-	if err != nil {
-		logger.Error(err, "failed to query Pyxis API")
-		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusError
-		updateErr := r.Status().Update(ctx, &cr)
-		if updateErr != nil {
-			logger.Error(updateErr, "failed to update status after Pyxis error")
-		}
-		return
-	}
 
 	if certData == nil {
 		// No certification data found
@@ -325,16 +341,15 @@ func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, r
 
 	// Query Docker Hub
 	repoInfo, err := r.DockerHubClient.GetRepositoryInfo(ctx, namespace, repo)
+	if err != nil {
+		logger.Error(err, "failed to query Docker Hub API")
+		return
+	}
 
 	// Fetch the latest version of the CR
 	var cr securityv1alpha1.ImageCertificationInfo
 	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
 		logger.Error(err, "failed to get ImageCertificationInfo for Docker Hub update")
-		return
-	}
-
-	if err != nil {
-		logger.Error(err, "failed to query Docker Hub API")
 		return
 	}
 
@@ -727,7 +742,7 @@ func (r *PodReconciler) updateCVEAnnotations(ctx context.Context, crName string,
 	if cr.Annotations == nil {
 		cr.Annotations = make(map[string]string)
 	}
-	cr.Annotations["security.telco.openshift.io/cves"] = strings.Join(cves, ",")
+	cr.Annotations[AnnotationCVEs] = strings.Join(cves, ",")
 	return r.Update(ctx, &cr)
 }
 
@@ -768,8 +783,6 @@ func (r *PodReconciler) emitChangeEvents(cr *securityv1alpha1.ImageCertification
 // isHealthDegraded compares health grades and returns true if the new grade is worse
 // Health grades are A > B > C > D > F
 func isHealthDegraded(oldGrade, newGrade string) bool {
-	gradeOrder := map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
-
 	oldVal, oldOk := gradeOrder[oldGrade]
 	newVal, newOk := gradeOrder[newGrade]
 

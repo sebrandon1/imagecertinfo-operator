@@ -155,23 +155,6 @@ func sanitizeK8sName(name string) string {
 	return s
 }
 
-// DigestToCRName converts a digest (sha256:abc123...) to a valid CR name (sha256-abc123...)
-// Deprecated: Use ReferenceToCRName instead for human-readable names
-func DigestToCRName(digest string) string {
-	// Replace : with - to make it a valid Kubernetes resource name
-	return strings.ReplaceAll(digest, ":", "-")
-}
-
-// CRNameToDigest converts a CR name back to a digest
-// Note: This only works with old-style sha256-based names
-func CRNameToDigest(crName string) string {
-	// Replace the first - with : (sha256-abc... -> sha256:abc...)
-	if suffix, ok := strings.CutPrefix(crName, "sha256-"); ok {
-		return "sha256:" + suffix
-	}
-	return crName
-}
-
 // ClassifyRegistry determines the RegistryType based on the registry hostname
 func ClassifyRegistry(registry string) securityv1alpha1.RegistryType {
 	registry = strings.ToLower(registry)

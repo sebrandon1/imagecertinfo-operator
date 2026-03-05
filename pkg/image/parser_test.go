@@ -222,58 +222,6 @@ func TestReferenceToCRName(t *testing.T) {
 	}
 }
 
-func TestDigestToCRName(t *testing.T) {
-	tests := []struct {
-		digest string
-		want   string
-	}{
-		{
-			digest: "sha256:abc123",
-			want:   "sha256-abc123",
-		},
-		{
-			digest: "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-			want:   "sha256-abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.digest, func(t *testing.T) {
-			if got := DigestToCRName(tt.digest); got != tt.want {
-				t.Errorf("DigestToCRName() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCRNameToDigest(t *testing.T) {
-	tests := []struct {
-		crName string
-		want   string
-	}{
-		{
-			crName: "sha256-abc123",
-			want:   "sha256:abc123",
-		},
-		{
-			crName: "sha256-abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-			want:   "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
-		},
-		{
-			crName: "other-format",
-			want:   "other-format",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.crName, func(t *testing.T) {
-			if got := CRNameToDigest(tt.crName); got != tt.want {
-				t.Errorf("CRNameToDigest() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestClassifyRegistry(t *testing.T) {
 	tests := []struct {
 		registry string
