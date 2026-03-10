@@ -61,6 +61,10 @@ make build-installer IMG=<img> # Generate dist/install.yaml
 - `config/manager/` - Deployment config
 - `config/samples/` - Example CRs (safe to edit)
 
+## Requirements
+
+- Go 1.26+
+
 ## Development Rules
 
 **Never edit (auto-generated):**
