@@ -527,8 +527,8 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 	for i := range crList.Items {
 		cr := &crList.Items[i]
 
-		// Determine which API to use based on registry
-		isRedHatRegistry := image.IsRedHatRegistry(cr.Spec.Registry)
+		// Determine which API to use based on stored registry type
+		isRedHatRegistry := cr.Status.RegistryType == securityv1alpha1.RegistryTypeRedHat
 		isDockerHub := cr.Spec.Registry == RegistryDockerHub
 
 		// Skip if no enrichment is possible
@@ -585,16 +585,7 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 	}
 
 	// Store old values for change detection
-	oldCertStatus := latestCR.Status.CertificationStatus
-	var oldHealthIndex string
-	var oldCriticalVulns, oldImportantVulns int
-	if latestCR.Status.PyxisData != nil {
-		oldHealthIndex = latestCR.Status.PyxisData.HealthIndex
-		if latestCR.Status.PyxisData.Vulnerabilities != nil {
-			oldCriticalVulns = latestCR.Status.PyxisData.Vulnerabilities.Critical
-			oldImportantVulns = latestCR.Status.PyxisData.Vulnerabilities.Important
-		}
-	}
+	oldSnapshot := snapshotImageState(&latestCR)
 
 	// Track CVEs for annotation updates (only relevant for Pyxis)
 	var cves []string
@@ -649,19 +640,8 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 	metrics.RecordImageRefreshed()
 
 	// Emit change events
-	var newHealthIndex string
-	var newCriticalVulns, newImportantVulns int
-	if latestCR.Status.PyxisData != nil {
-		newHealthIndex = latestCR.Status.PyxisData.HealthIndex
-		if latestCR.Status.PyxisData.Vulnerabilities != nil {
-			newCriticalVulns = latestCR.Status.PyxisData.Vulnerabilities.Critical
-			newImportantVulns = latestCR.Status.PyxisData.Vulnerabilities.Important
-		}
-	}
-
-	r.emitChangeEvents(&latestCR, oldCertStatus, latestCR.Status.CertificationStatus,
-		oldHealthIndex, newHealthIndex,
-		oldCriticalVulns, oldImportantVulns, newCriticalVulns, newImportantVulns)
+	newSnapshot := snapshotImageState(&latestCR)
+	r.emitChangeEvents(&latestCR, oldSnapshot, newSnapshot)
 
 	return nil
 }
@@ -746,35 +726,52 @@ func (r *PodReconciler) updateCVEAnnotations(ctx context.Context, crName string,
 	return r.Update(ctx, &cr)
 }
 
-// emitChangeEvents emits Kubernetes events when certification status, health, or vulnerabilities change
-func (r *PodReconciler) emitChangeEvents(cr *securityv1alpha1.ImageCertificationInfo,
-	oldCertStatus, newCertStatus securityv1alpha1.CertificationStatus,
-	oldHealth, newHealth string,
-	oldCritical, oldImportant, newCritical, newImportant int) {
+// imageStateSnapshot captures the state of an image for change detection
+type imageStateSnapshot struct {
+	CertStatus     securityv1alpha1.CertificationStatus
+	HealthGrade    string
+	CriticalVulns  int
+	ImportantVulns int
+}
 
+// snapshotImageState captures the current state of a CR for change comparison
+func snapshotImageState(cr *securityv1alpha1.ImageCertificationInfo) imageStateSnapshot {
+	s := imageStateSnapshot{CertStatus: cr.Status.CertificationStatus}
+	if cr.Status.PyxisData != nil {
+		s.HealthGrade = cr.Status.PyxisData.HealthIndex
+		if cr.Status.PyxisData.Vulnerabilities != nil {
+			s.CriticalVulns = cr.Status.PyxisData.Vulnerabilities.Critical
+			s.ImportantVulns = cr.Status.PyxisData.Vulnerabilities.Important
+		}
+	}
+	return s
+}
+
+// emitChangeEvents emits Kubernetes events when certification status, health, or vulnerabilities change
+func (r *PodReconciler) emitChangeEvents(cr *securityv1alpha1.ImageCertificationInfo, old, new imageStateSnapshot) {
 	if r.Recorder == nil {
 		return
 	}
 
 	// Certification status changed
-	if oldCertStatus != newCertStatus && oldCertStatus != "" {
-		msg := fmt.Sprintf("Certification status changed from %s to %s", oldCertStatus, newCertStatus)
+	if old.CertStatus != new.CertStatus && old.CertStatus != "" {
+		msg := fmt.Sprintf("Certification status changed from %s to %s", old.CertStatus, new.CertStatus)
 		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonCertificationChanged, msg)
 		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonCertificationChanged)
-		metrics.RecordCertificationStatusChange(string(oldCertStatus), string(newCertStatus))
+		metrics.RecordCertificationStatusChange(string(old.CertStatus), string(new.CertStatus))
 	}
 
 	// Health grade degraded
-	if oldHealth != "" && newHealth != "" && isHealthDegraded(oldHealth, newHealth) {
-		msg := fmt.Sprintf("Health grade degraded from %s to %s", oldHealth, newHealth)
+	if old.HealthGrade != "" && new.HealthGrade != "" && isHealthDegraded(old.HealthGrade, new.HealthGrade) {
+		msg := fmt.Sprintf("Health grade degraded from %s to %s", old.HealthGrade, new.HealthGrade)
 		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonHealthDegraded, msg)
 		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonHealthDegraded)
 	}
 
 	// New critical/important vulnerabilities
-	if newCritical > oldCritical || newImportant > oldImportant {
+	if new.CriticalVulns > old.CriticalVulns || new.ImportantVulns > old.ImportantVulns {
 		msg := fmt.Sprintf("Vulnerabilities increased: critical %d→%d, important %d→%d",
-			oldCritical, newCritical, oldImportant, newImportant)
+			old.CriticalVulns, new.CriticalVulns, old.ImportantVulns, new.ImportantVulns)
 		r.Recorder.Event(cr, corev1.EventTypeWarning, EventReasonVulnerabilitiesFound, msg)
 		metrics.RecordEvent(corev1.EventTypeWarning, EventReasonVulnerabilitiesFound)
 	}
