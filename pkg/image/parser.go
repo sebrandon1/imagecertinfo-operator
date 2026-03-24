@@ -155,33 +155,34 @@ func sanitizeK8sName(name string) string {
 	return s
 }
 
-// ClassifyRegistry determines the RegistryType based on the registry hostname
-func ClassifyRegistry(registry string) securityv1alpha1.RegistryType {
-	registry = strings.ToLower(registry)
-
-	// Red Hat registries
-	redHatRegistries := []string{
+// Known registry sets (package-level to avoid per-call allocation)
+var (
+	redHatRegistries = []string{
 		"registry.redhat.io",
 		"registry.access.redhat.com",
 		"registry.connect.redhat.com",
 	}
-	if slices.Contains(redHatRegistries, registry) {
-		return securityv1alpha1.RegistryTypeRedHat
-	}
-
-	// Partner registry (Quay.io)
-	if registry == "quay.io" {
-		return securityv1alpha1.RegistryTypePartner
-	}
-
-	// Community registries
-	communityRegistries := []string{
+	communityRegistries = []string{
 		"docker.io",
 		"ghcr.io",
 		"gcr.io",
 		"registry.k8s.io",
 		"k8s.gcr.io",
 	}
+)
+
+// ClassifyRegistry determines the RegistryType based on the registry hostname
+func ClassifyRegistry(registry string) securityv1alpha1.RegistryType {
+	registry = strings.ToLower(registry)
+
+	if slices.Contains(redHatRegistries, registry) {
+		return securityv1alpha1.RegistryTypeRedHat
+	}
+
+	if registry == "quay.io" {
+		return securityv1alpha1.RegistryTypePartner
+	}
+
 	if slices.Contains(communityRegistries, registry) {
 		return securityv1alpha1.RegistryTypeCommunity
 	}

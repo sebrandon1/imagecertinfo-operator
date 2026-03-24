@@ -62,15 +62,6 @@ type DockerHubRepositoryResponse struct {
 	// For verified publishers, the namespace will have special properties
 }
 
-// DockerHubNamespaceResponse represents namespace info from Docker Hub
-// Deprecated: Use DockerHubOrgResponse instead
-type DockerHubNamespaceResponse struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`
-	IsVerifiedPublisher bool     `json:"is_verified_publisher"`
-	ContentTypes        []string `json:"content_types"`
-}
-
 // DockerHubOrgResponse represents organization info from Docker Hub
 // GET https://hub.docker.com/v2/orgs/{namespace}
 type DockerHubOrgResponse struct {
