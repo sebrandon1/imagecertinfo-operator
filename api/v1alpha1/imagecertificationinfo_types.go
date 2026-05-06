@@ -282,7 +282,3 @@ type ImageCertificationInfoList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ImageCertificationInfo `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&ImageCertificationInfo{}, &ImageCertificationInfoList{})
-}
