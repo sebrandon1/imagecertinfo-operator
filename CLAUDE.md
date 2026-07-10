@@ -14,6 +14,7 @@ make build                    # Build binary to bin/manager
 make test                     # Unit tests with envtest (real K8s API + etcd)
 make lint                     # Run golangci-lint
 make lint-fix                 # Auto-fix lint issues
+make lint-config              # Verify golangci-lint configuration
 
 # Run locally (uses current kubeconfig)
 make run
@@ -46,6 +47,7 @@ make build-installer IMG=<img> # Generate dist/install.yaml
 - `pkg/pyxis/` - Red Hat Pyxis API client with caching and rate limiting
 - `pkg/dockerhub/` - Docker Hub API client for metadata enrichment (pull counts, verified publisher status)
 - `pkg/image/` - Container image reference parser
+- `pkg/secrets/` - Kubernetes Secret reader for API keys (pull secret auth for registries)
 - `internal/metrics/` - Prometheus metrics
 
 **Key Patterns:**
@@ -116,4 +118,5 @@ go test -v ./internal/controller/... -ginkgo.focus="specific description"
 | `pkg/dockerhub/client.go` | Docker Hub API HTTP client |
 | `pkg/dockerhub/cache.go` | Docker Hub response caching |
 | `pkg/image/parser.go` | Image reference parsing |
+| `pkg/secrets/reader.go` | Kubernetes Secret reader for API keys |
 | `internal/metrics/metrics.go` | Prometheus metrics definitions |

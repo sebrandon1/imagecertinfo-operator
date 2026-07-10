@@ -54,7 +54,7 @@ kubectl delete -f https://raw.githubusercontent.com/sebrandon1/imagecertinfo-ope
 
 ## Prerequisites
 
-- Kubernetes v1.11.3+ or OpenShift 4.x
+- Kubernetes v1.28+ or OpenShift 4.x
 - kubectl or oc CLI
 - Cluster-admin privileges (for CRD installation)
 
