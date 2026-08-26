@@ -25,6 +25,13 @@ import (
 	"time"
 )
 
+const (
+	testNSLibrary  = "library"
+	testRepoNginx  = "nginx"
+	testNSBitnami  = "bitnami"
+	testNSSomeuser = "someuser"
+)
+
 func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -41,11 +48,11 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 	}{
 		{
 			name:       "official image found",
-			namespace:  "library",
-			repository: "nginx",
+			namespace:  testNSLibrary,
+			repository: testRepoNginx,
 			repoResponse: &DockerHubRepositoryResponse{
-				Namespace:   "library",
-				Name:        "nginx",
+				Namespace:   testNSLibrary,
+				Name:        testRepoNginx,
 				PullCount:   10_000_000_000,
 				StarCount:   15000,
 				LastUpdated: time.Now().Add(-10 * 24 * time.Hour),
@@ -60,10 +67,10 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 		},
 		{
 			name:       "verified publisher image",
-			namespace:  "bitnami",
+			namespace:  testNSBitnami,
 			repository: "redis",
 			repoResponse: &DockerHubRepositoryResponse{
-				Namespace:   "bitnami",
+				Namespace:   testNSBitnami,
 				Name:        "redis",
 				PullCount:   500_000_000,
 				StarCount:   100,
@@ -71,7 +78,7 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 				Description: "Bitnami Redis",
 			},
 			orgResponse: &DockerHubOrgResponse{
-				Orgname: "bitnami",
+				Orgname: testNSBitnami,
 				Badge:   "verified_publisher",
 			},
 			serverStatus:  http.StatusOK,
@@ -83,10 +90,10 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 		},
 		{
 			name:       "community image",
-			namespace:  "someuser",
+			namespace:  testNSSomeuser,
 			repository: "myapp",
 			repoResponse: &DockerHubRepositoryResponse{
-				Namespace:   "someuser",
+				Namespace:   testNSSomeuser,
 				Name:        "myapp",
 				PullCount:   100,
 				StarCount:   0,
@@ -94,7 +101,7 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 				Description: "My test app",
 			},
 			orgResponse: &DockerHubOrgResponse{
-				Orgname: "someuser",
+				Orgname: testNSSomeuser,
 				Badge:   "",
 			},
 			serverStatus:  http.StatusOK,
@@ -114,15 +121,15 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 		},
 		{
 			name:         "rate limited",
-			namespace:    "library",
-			repository:   "nginx",
+			namespace:    testNSLibrary,
+			repository:   testRepoNginx,
 			serverStatus: http.StatusTooManyRequests,
 			wantErr:      true,
 		},
 		{
 			name:         "server error",
-			namespace:    "library",
-			repository:   "nginx",
+			namespace:    testNSLibrary,
+			repository:   testRepoNginx,
 			serverStatus: http.StatusInternalServerError,
 			wantErr:      true,
 		},

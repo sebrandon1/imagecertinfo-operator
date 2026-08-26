@@ -24,6 +24,8 @@ import (
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 )
 
+const registryDockerIO = "docker.io"
+
 // Reference contains parsed image reference components
 type Reference struct {
 	// Registry is the container registry hostname
@@ -77,7 +79,7 @@ func ParseImageID(imageID string) (*Reference, error) {
 	before, after, ok := strings.Cut(imageWithoutDigest, "/")
 	if !ok {
 		// No slash means it's a docker.io library image
-		ref.Registry = "docker.io"
+		ref.Registry = registryDockerIO
 		ref.Repository = "library/" + imageWithoutDigest
 	} else {
 		possibleRegistry := before
@@ -89,7 +91,7 @@ func ParseImageID(imageID string) (*Reference, error) {
 			ref.Repository = after
 		} else {
 			// No registry specified, assume docker.io
-			ref.Registry = "docker.io"
+			ref.Registry = registryDockerIO
 			ref.Repository = imageWithoutDigest
 		}
 	}
@@ -163,7 +165,7 @@ var (
 		"registry.connect.redhat.com",
 	}
 	communityRegistries = []string{
-		"docker.io",
+		registryDockerIO,
 		"ghcr.io",
 		"gcr.io",
 		"registry.k8s.io",

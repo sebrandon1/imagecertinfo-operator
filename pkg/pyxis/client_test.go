@@ -25,6 +25,11 @@ import (
 	"testing"
 )
 
+const (
+	testPyxisRegistry   = "registry.redhat.io"
+	testPyxisRepository = "ubi8/ubi"
+)
+
 func TestHTTPClient_GetImageCertification(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -40,7 +45,7 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 	}{
 		{
 			name:       "certified image found",
-			registry:   "registry.redhat.io",
+			registry:   testPyxisRegistry,
 			repository: "ubi8/ubi",
 			digest:     "sha256:abc123",
 			imageResponse: &PyxisImageResponse{
@@ -50,7 +55,7 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 					{Grade: "A"},
 				},
 				Repositories: []PyxisImageRepository{
-					{Registry: "registry.redhat.io", Repository: "ubi8/ubi"},
+					{Registry: testPyxisRegistry, Repository: "ubi8/ubi"},
 				},
 				ParsedData: &PyxisImageParsedData{
 					Labels: []PyxisLabel{
@@ -84,7 +89,7 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 		},
 		{
 			name:         "image not found",
-			registry:     "registry.redhat.io",
+			registry:     testPyxisRegistry,
 			repository:   "unknown/image",
 			digest:       "sha256:notfound",
 			serverStatus: http.StatusNotFound,
@@ -93,7 +98,7 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 		},
 		{
 			name:         "unauthorized",
-			registry:     "registry.redhat.io",
+			registry:     testPyxisRegistry,
 			repository:   "protected/image",
 			digest:       "sha256:protected",
 			serverStatus: http.StatusUnauthorized,
@@ -101,7 +106,7 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 		},
 		{
 			name:         "server error",
-			registry:     "registry.redhat.io",
+			registry:     testPyxisRegistry,
 			repository:   "error/image",
 			digest:       "sha256:error",
 			serverStatus: http.StatusInternalServerError,

@@ -40,6 +40,7 @@ import (
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
+	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/secrets"
@@ -363,7 +364,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager")
+	setupLog.Info("starting manager", "version", version.Version)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
