@@ -780,3 +780,45 @@ func TestPodReconciler_StartRefreshLoop(t *testing.T) {
 	// Give time for goroutine to exit
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestDigestLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		digest string
+		want   string
+	}{
+		{
+			name:   "empty digest",
+			digest: "",
+			want:   "sha256-",
+		},
+		{
+			name:   "full sha256 digest truncated to 16",
+			digest: "sha256:abcdef1234567890abcdef1234567890",
+			want:   "sha256-abcdef1234567890",
+		},
+		{
+			name:   "exactly 16 hex chars",
+			digest: "sha256:1234567890abcdef",
+			want:   "sha256-1234567890abcdef",
+		},
+		{
+			name:   "shorter than 16 hex chars kept as-is",
+			digest: "sha256:abc123",
+			want:   "sha256-abc123",
+		},
+		{
+			name:   "no sha256 prefix passes through",
+			digest: "abc123",
+			want:   "sha256-abc123",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := digestLabel(tt.digest)
+			if got != tt.want {
+				t.Errorf("digestLabel(%q) = %q, want %q", tt.digest, got, tt.want)
+			}
+		})
+	}
+}
