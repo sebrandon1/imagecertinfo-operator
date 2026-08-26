@@ -55,6 +55,28 @@ Status:
     - Container:  ubi-container
       Name:       my-app-pod
       Namespace:  default
+  Days Until EOL:  120
+  Image Age:       45 days
+```
+
+## Docker Hub Images
+
+For images from `docker.io`, the operator also populates `dockerHubData`:
+
+```bash
+kubectl describe imagecertificationinfo docker.io.library.nginx.7g8h9i0j
+```
+
+```yaml
+Status:
+  Certification Status: NotCertified
+  Registry Type:        Community
+  Docker Hub Data:
+    Pull Count:          1234567890
+    Star Count:          18000
+    Is Official:         true
+    Is Verified Publisher: false
+    Last Updated:        "2026-01-15T10:00:00Z"
 ```
 
 ## Find Images with Vulnerabilities

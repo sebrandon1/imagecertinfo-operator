@@ -7,11 +7,16 @@ flowchart LR
     subgraph Cluster
         A[Pod Controller] -->|watches| B[Pods]
         B -->|extract images| C[Image Parser]
+        S[Secrets Reader] -->|api key| A
     end
 
     C -->|query| D[Pyxis API Client]
     D -->|cache| E[Response Cache]
     D -->|rate limit| F[Red Hat Pyxis API]
+
+    C -->|docker.io images| DH[Docker Hub Client]
+    DH -->|cache| DHC[Response Cache]
+    DH -->|rate limit| DHAPI[Docker Hub API]
 
     A -->|create/update| G[ImageCertificationInfo CR]
 
@@ -21,15 +26,18 @@ flowchart LR
 
     A -->|emit| H
     D -->|emit| H
+    DH -->|emit| H
 ```
 
 ## Flow
 
 1. **Pod Controller** watches all pods cluster-wide for create/update/delete events
 2. **Image Parser** extracts and normalizes container image references from pod specs
-3. **Pyxis Client** queries Red Hat's Pyxis API with caching and rate limiting
-4. **ImageCertificationInfo CR** is created/updated with certification data and pod references
-5. **Metrics** are emitted for monitoring via Prometheus
+3. **Secrets Reader** (`pkg/secrets/`) optionally reads a Kubernetes Secret for the Pyxis API key
+4. **Pyxis Client** queries Red Hat's Pyxis API with caching and rate limiting (for all images)
+5. **Docker Hub Client** queries Docker Hub metadata for `docker.io` images (pull counts, publisher info)
+6. **ImageCertificationInfo CR** is created/updated with certification data, Docker Hub metadata, and pod references
+7. **Metrics** are emitted for monitoring via Prometheus
 
 ## How It Differs from Red Hat ACS
 
