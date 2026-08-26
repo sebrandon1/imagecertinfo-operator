@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay.io/bapalm/imagecertinfo-operator
-  newTag: v0.2.20
+  newTag: v0.2.21
