@@ -350,6 +350,42 @@ spec:
                         type: integer
                     type: object
                 type: object
+              quayData:
+                description: QuayData contains metadata from Quay.io (only populated
+                  for quay.io images)
+                properties:
+                  daysSinceUpdate:
+                    description: DaysSinceUpdate is the computed days since the most
+                      recent tag was modified
+                    type: integer
+                  description:
+                    description: Description is the repository description
+                    type: string
+                  isOrganization:
+                    description: IsOrganization indicates whether the repository belongs
+                      to an organization
+                    type: boolean
+                  isPublic:
+                    description: IsPublic indicates whether the repository is publicly
+                      visible
+                    type: boolean
+                  lastModified:
+                    description: LastModified is the most recent tag modification
+                      time
+                    format: date-time
+                    type: string
+                  state:
+                    description: State is the repository state (e.g., "NORMAL", "READ_ONLY",
+                      "MIRROR")
+                    type: string
+                  tagCount:
+                    description: TagCount is the number of tags in the repository
+                    type: integer
+                  trustEnabled:
+                    description: TrustEnabled indicates whether content trust (signing)
+                      is enabled
+                    type: boolean
+                type: object
               registryType:
                 default: Unknown
                 description: RegistryType indicates the type of registry (RedHat,

@@ -38,6 +38,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	quaylib "github.com/sebrandon1/go-quay/lib"
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
@@ -85,6 +86,12 @@ func main() {
 	var dockerHubCacheTTL time.Duration
 	var dockerHubRateLimit float64
 	var dockerHubRateBurst int
+
+	// Quay.io configuration flags
+	var quayEnabled bool
+	var quayCacheTTL time.Duration
+	var quayRateLimit float64
+	var quayRateBurst int
 
 	// Pyxis API key secret configuration flags
 	var pyxisAPIKeySecretName string
@@ -136,6 +143,16 @@ func main() {
 		"Rate limit for Docker Hub API requests per second (default 5)")
 	flag.IntVar(&dockerHubRateBurst, "dockerhub-rate-burst", dockerhub.DefaultRateBurst,
 		"Burst size for Docker Hub API rate limiting (default 10)")
+
+	// Quay.io flags
+	flag.BoolVar(&quayEnabled, "quay-enabled", true,
+		"Enable Quay.io metadata enrichment for quay.io images")
+	flag.DurationVar(&quayCacheTTL, "quay-cache-ttl", quaylib.DefaultCacheTTL,
+		"TTL for cached Quay.io API responses (default 1 hour)")
+	flag.Float64Var(&quayRateLimit, "quay-rate-limit", quaylib.DefaultRateLimit,
+		"Rate limit for Quay.io API requests per second (default 5)")
+	flag.IntVar(&quayRateBurst, "quay-rate-burst", quaylib.DefaultRateBurst,
+		"Burst size for Quay.io API rate limiting (default 10)")
 
 	// Pyxis API key secret flags
 	flag.StringVar(&pyxisAPIKeySecretName, "pyxis-api-key-secret-name", "",
@@ -321,12 +338,29 @@ func main() {
 			baseDockerHubClient, dockerHubCacheTTL, dockerHubRateLimit, dockerHubRateBurst)
 	}
 
+	// Initialize Quay.io client if enabled
+	var quayClient quaylib.RepositoryReader
+	if quayEnabled {
+		setupLog.Info("Quay.io integration enabled",
+			"cacheTTL", quayCacheTTL,
+			"rateLimit", quayRateLimit,
+			"rateBurst", quayRateBurst)
+		baseQuayClient, err := quaylib.NewClient("")
+		if err != nil {
+			setupLog.Error(err, "unable to create Quay.io client")
+			os.Exit(1)
+		}
+
+		quayClient = quaylib.NewCachedRateLimitedClient(baseQuayClient, quayCacheTTL, quayRateLimit, quayRateBurst)
+	}
+
 	// Set up the Pod controller
 	podReconciler := &controller.PodReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		PyxisClient:     pyxisClient,
 		DockerHubClient: dockerHubClient,
+		QuayClient:      quayClient,
 		Recorder:        mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
 	}
 
@@ -345,6 +379,9 @@ func main() {
 	}
 	if cachedClient, ok := dockerHubClient.(*dockerhub.CachedClient); ok {
 		cachedClient.StartCleanupLoop(ctx, dockerHubCacheTTL/2)
+	}
+	if cachedClient, ok := quayClient.(*quaylib.CachedClient); ok {
+		cachedClient.StartCleanupLoop(ctx, quayCacheTTL/2)
 	}
 
 	// Start the periodic refresh loop for Pyxis data

@@ -38,6 +38,8 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
+
+	quaylib "github.com/sebrandon1/go-quay/lib"
 )
 
 // Event reasons for Kubernetes events
@@ -52,6 +54,7 @@ const (
 // Registry constants
 const (
 	RegistryDockerHub = "docker.io"
+	RegistryQuayIO    = "quay.io"
 )
 
 // Annotation keys
@@ -85,6 +88,7 @@ type PodReconciler struct {
 	Scheme          *runtime.Scheme
 	PyxisClient     pyxis.Client
 	DockerHubClient dockerhub.Client
+	QuayClient      quaylib.RepositoryReader
 	Recorder        record.EventRecorder
 }
 
@@ -240,6 +244,11 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 	// If Docker Hub client is available and this is docker.io, enrich with Docker Hub data
 	if r.DockerHubClient != nil && ref.Registry == RegistryDockerHub {
 		go r.checkDockerHubData(context.Background(), cr.Name, ref)
+	}
+
+	// If Quay client is available and this is quay.io, enrich with Quay data
+	if r.QuayClient != nil && ref.Registry == RegistryQuayIO {
+		go r.checkQuayData(context.Background(), cr.Name, ref)
 	}
 
 	return nil
@@ -434,6 +443,71 @@ func (r *PodReconciler) updateCRWithDockerHubData(cr *securityv1alpha1.ImageCert
 	}
 }
 
+// checkQuayData queries the Quay.io API for repository metadata
+func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *image.Reference) {
+	logger := log.FromContext(ctx).WithValues("crName", crName)
+
+	if r.QuayClient == nil {
+		return
+	}
+
+	namespace, repo := parseQuayRepo(ref.Repository)
+
+	start := time.Now()
+	repoInfo, err := r.QuayClient.GetRepository(ctx, namespace, repo)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordQuayRequest("error", "repository", duration)
+		logger.Error(err, "failed to query Quay.io API")
+		return
+	}
+
+	metrics.RecordQuayRequest("success", "repository", duration)
+
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		logger.Error(err, "failed to get ImageCertificationInfo for Quay update")
+		return
+	}
+
+	r.updateCRWithQuayData(&cr, &repoInfo)
+
+	if err := r.Status().Update(ctx, &cr); err != nil {
+		logger.Error(err, "failed to update ImageCertificationInfo with Quay data")
+	}
+}
+
+// parseQuayRepo parses a repository path into namespace and repository name
+func parseQuayRepo(repository string) (namespace, repo string) {
+	parts := strings.SplitN(repository, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return repository, repository
+}
+
+// updateCRWithQuayData updates a CR's status with data from Quay.io
+func (r *PodReconciler) updateCRWithQuayData(cr *securityv1alpha1.ImageCertificationInfo, repo *quaylib.RepositoryWithTags) {
+	quayData := &securityv1alpha1.QuayData{
+		IsPublic:       repo.IsPublic,
+		IsOrganization: repo.IsOrganization,
+		TrustEnabled:   repo.TrustEnabled,
+		State:          repo.State,
+		Description:    repo.Description,
+		TagCount:       len(repo.Tags.Tags),
+	}
+
+	latest := repo.LatestTagTimestamp()
+	if !latest.IsZero() {
+		daysSince := quaylib.CalculateDaysSince(latest)
+		quayData.LastModified = &metav1.Time{Time: latest}
+		quayData.DaysSinceUpdate = &daysSince
+	}
+
+	cr.Status.QuayData = quayData
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -562,9 +636,10 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 		// Determine which API to use based on stored registry type
 		isRedHatRegistry := cr.Status.RegistryType == securityv1alpha1.RegistryTypeRedHat
 		isDockerHub := cr.Spec.Registry == RegistryDockerHub
+		isQuayIO := cr.Spec.Registry == RegistryQuayIO
 
 		// Skip if no enrichment is possible
-		if !isRedHatRegistry && !isDockerHub {
+		if !isRedHatRegistry && !isDockerHub && !isQuayIO {
 			skipped++
 			continue
 		}
@@ -652,6 +727,16 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 		if repoInfo != nil {
 			r.updateCRWithDockerHubData(&latestCR, repoInfo)
 		}
+	} else if cr.Spec.Registry == RegistryQuayIO && r.QuayClient != nil {
+		// Query Quay.io for quay.io images
+		namespace, repo := parseQuayRepo(cr.Spec.Repository)
+		repoInfo, err := r.QuayClient.GetRepository(ctx, namespace, repo)
+		if err != nil {
+			logger.Error(err, "failed to query Quay.io API during refresh")
+			return err
+		}
+
+		r.updateCRWithQuayData(&latestCR, &repoInfo)
 	} else {
 		// No client available for this registry
 		return nil

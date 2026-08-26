@@ -170,6 +170,41 @@ type DockerHubData struct {
 	PullCountFormatted string `json:"pullCountFormatted,omitempty"`
 }
 
+// QuayData contains metadata from Quay.io API
+type QuayData struct {
+	// IsPublic indicates whether the repository is publicly visible
+	// +optional
+	IsPublic bool `json:"isPublic,omitempty"`
+
+	// IsOrganization indicates whether the repository belongs to an organization
+	// +optional
+	IsOrganization bool `json:"isOrganization,omitempty"`
+
+	// TrustEnabled indicates whether content trust (signing) is enabled
+	// +optional
+	TrustEnabled bool `json:"trustEnabled,omitempty"`
+
+	// State is the repository state (e.g., "NORMAL", "READ_ONLY", "MIRROR")
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// Description is the repository description
+	// +optional
+	Description string `json:"description,omitempty"`
+
+	// LastModified is the most recent tag modification time
+	// +optional
+	LastModified *metav1.Time `json:"lastModified,omitempty"`
+
+	// DaysSinceUpdate is the computed days since the most recent tag was modified
+	// +optional
+	DaysSinceUpdate *int `json:"daysSinceUpdate,omitempty"`
+
+	// TagCount is the number of tags in the repository
+	// +optional
+	TagCount int `json:"tagCount,omitempty"`
+}
+
 // ImageCertificationInfoSpec defines the desired state of ImageCertificationInfo
 type ImageCertificationInfoSpec struct {
 	// ImageDigest is the sha256 digest of the image
@@ -211,6 +246,10 @@ type ImageCertificationInfoStatus struct {
 	// DockerHubData contains metadata from Docker Hub (only populated for docker.io images)
 	// +optional
 	DockerHubData *DockerHubData `json:"dockerHubData,omitempty"`
+
+	// QuayData contains metadata from Quay.io (only populated for quay.io images)
+	// +optional
+	QuayData *QuayData `json:"quayData,omitempty"`
 
 	// PodReferences lists all pods currently using this image
 	// +optional
