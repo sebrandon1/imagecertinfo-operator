@@ -61,6 +61,14 @@ sum(rate(imagecertinfo_reconcile_total{result="error"}[5m])) /
 sum(rate(imagecertinfo_reconcile_total[5m])) * 100
 ```
 
+## Docker Hub API Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_dockerhub_requests_total` | Counter | `status`, `endpoint` | Total Docker Hub API requests |
+| `imagecertinfo_dockerhub_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
+| `imagecertinfo_dockerhub_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
+
 ## OpenShift Monitoring Integration
 
 To enable metrics scraping with OpenShift's built-in monitoring:
