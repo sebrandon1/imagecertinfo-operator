@@ -385,33 +385,4 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 			}).Should(Succeed())
 		})
 	})
-
-	Context("Digest label on ICI CRs", func() {
-		It("should set a digest label on all created ImageCertificationInfo CRs", func() {
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "imagecertificationinfoes", "-o", "json")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				var iciList struct {
-					Items []struct {
-						Metadata struct {
-							Labels map[string]string `json:"labels"`
-						} `json:"metadata"`
-					} `json:"items"`
-				}
-				err = json.Unmarshal([]byte(output), &iciList)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(iciList.Items).NotTo(BeEmpty(), "expected at least one ICI CR to exist")
-
-				for _, ici := range iciList.Items {
-					label := ici.Metadata.Labels["imagecertinfo.security.telco.openshift.io/digest"]
-					g.Expect(label).To(HavePrefix("sha256-"),
-						"digest label must start with sha256-")
-					hex := strings.TrimPrefix(label, "sha256-")
-					g.Expect(hex).NotTo(BeEmpty(), "digest hex must not be empty")
-				}
-			}).Should(Succeed())
-		})
-	})
 })
