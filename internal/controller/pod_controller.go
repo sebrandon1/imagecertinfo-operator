@@ -58,8 +58,24 @@ const (
 	AnnotationCVEs = "security.telco.openshift.io/cves"
 )
 
+// Label keys stamped on ImageCertificationInfo CRs for external operator lookup
+const (
+	LabelDigest = "imagecertinfo.security.telco.openshift.io/digest"
+)
+
 // gradeOrder maps health grades to numeric values for comparison
 var gradeOrder = map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
+
+// digestLabel builds the value for LabelDigest from a full sha256 digest string.
+// The colon in "sha256:" is not valid in label values, so we use "sha256-" instead.
+// We use the first 16 hex characters to keep the label short and unique enough.
+func digestLabel(digest string) string {
+	hex := strings.TrimPrefix(digest, "sha256:")
+	if len(hex) > 16 {
+		hex = hex[:16]
+	}
+	return "sha256-" + hex
+}
 
 // PodReconciler reconciles a Pod object and creates/updates ImageCertificationInfo resources
 type PodReconciler struct {
@@ -163,6 +179,9 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 	cr := &securityv1alpha1.ImageCertificationInfo{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: crName,
+			Labels: map[string]string{
+				LabelDigest: digestLabel(ref.Digest),
+			},
 		},
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        ref.Digest,

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,12 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	}
 	if cr.Status.PodReferences[0].Container != testContainer {
 		t.Errorf("PodReference.Container = %v, want %s", cr.Status.PodReferences[0].Container, testContainer)
+	}
+
+	// Verify digest label is set for external operator lookup
+	wantDigestLabel := "sha256-" + strings.TrimPrefix(testDigest, "sha256:")[:16]
+	if got := cr.Labels[LabelDigest]; got != wantDigestLabel {
+		t.Errorf("Label %q = %q, want %q", LabelDigest, got, wantDigestLabel)
 	}
 }
 
