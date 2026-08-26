@@ -34,6 +34,7 @@ import (
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
+	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
@@ -60,7 +61,8 @@ const (
 
 // Label keys stamped on ImageCertificationInfo CRs for external operator lookup
 const (
-	LabelDigest = "imagecertinfo.security.telco.openshift.io/digest"
+	LabelDigest          = "imagecertinfo.security.telco.openshift.io/digest"
+	LabelOperatorVersion = "imagecertinfo.security.telco.openshift.io/operator-version"
 )
 
 // gradeOrder maps health grades to numeric values for comparison
@@ -180,7 +182,8 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 		ObjectMeta: metav1.ObjectMeta{
 			Name: crName,
 			Labels: map[string]string{
-				LabelDigest: digestLabel(ref.Digest),
+				LabelDigest:          digestLabel(ref.Digest),
+				LabelOperatorVersion: version.Version,
 			},
 		},
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
@@ -245,6 +248,16 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 // updatePodReferences updates the pod references in an existing ImageCertificationInfo
 func (r *PodReconciler) updatePodReferences(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, podRef securityv1alpha1.PodReference) error {
 	now := metav1.Now()
+
+	if cr.Labels[LabelOperatorVersion] != version.Version {
+		if cr.Labels == nil {
+			cr.Labels = make(map[string]string)
+		}
+		cr.Labels[LabelOperatorVersion] = version.Version
+		if err := r.Update(ctx, cr); err != nil {
+			return err
+		}
+	}
 
 	// Check if this pod reference already exists
 	for _, existing := range cr.Status.PodReferences {

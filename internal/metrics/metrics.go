@@ -24,6 +24,10 @@ import (
 const (
 	// MetricsNamespace is the namespace for all imagecertinfo metrics
 	MetricsNamespace = "imagecertinfo"
+
+	labelStatus   = "status"
+	labelEndpoint = "endpoint"
+	labelResult   = "result"
 )
 
 var (
@@ -36,7 +40,7 @@ var (
 			Name:      "images_total",
 			Help:      "Total number of images tracked by certification status",
 		},
-		[]string{"status"},
+		[]string{labelStatus},
 	)
 
 	// ImagesByHealth tracks images by health grade
@@ -87,7 +91,7 @@ var (
 			Name:      "pyxis_requests_total",
 			Help:      "Total number of Pyxis API requests",
 		},
-		[]string{"status", "endpoint"},
+		[]string{labelStatus, labelEndpoint},
 	)
 
 	// PyxisRequestDuration tracks Pyxis API request duration
@@ -98,7 +102,7 @@ var (
 			Help:      "Duration of Pyxis API requests in seconds",
 			Buckets:   []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
 		},
-		[]string{"endpoint"},
+		[]string{labelEndpoint},
 	)
 
 	// PyxisCacheHits tracks cache hit/miss ratio
@@ -108,7 +112,7 @@ var (
 			Name:      "pyxis_cache_hits_total",
 			Help:      "Total number of Pyxis cache hits and misses",
 		},
-		[]string{"result"}, // "hit" or "miss"
+		[]string{labelResult},
 	)
 
 	// Reconciliation Metrics
@@ -120,7 +124,7 @@ var (
 			Name:      "reconcile_total",
 			Help:      "Total number of reconciliation attempts",
 		},
-		[]string{"result"}, // "success", "error", "requeue"
+		[]string{labelResult},
 	)
 
 	// ReconcileDuration tracks reconciliation duration
@@ -204,7 +208,7 @@ var (
 			Name:      "dockerhub_requests_total",
 			Help:      "Total number of Docker Hub API requests",
 		},
-		[]string{"status", "endpoint"},
+		[]string{labelStatus, labelEndpoint},
 	)
 
 	// DockerHubRequestDuration tracks Docker Hub API request duration
@@ -215,7 +219,7 @@ var (
 			Help:      "Duration of Docker Hub API requests in seconds",
 			Buckets:   []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
 		},
-		[]string{"endpoint"},
+		[]string{labelEndpoint},
 	)
 
 	// DockerHubCacheHits tracks cache hit/miss ratio
@@ -225,7 +229,7 @@ var (
 			Name:      "dockerhub_cache_hits_total",
 			Help:      "Total number of Docker Hub cache hits and misses",
 		},
-		[]string{"result"}, // "hit" or "miss"
+		[]string{labelResult},
 	)
 )
 

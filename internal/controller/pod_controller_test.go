@@ -36,11 +36,15 @@ import (
 )
 
 const (
-	testDigest    = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
-	testCRName    = "registry.redhat.io.ubi8.ubi.abc123de"
-	testNamespace = "default"
-	testPodName   = "test-pod"
-	testContainer = "test-container"
+	testDigest      = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+	testCRName      = "registry.redhat.io.ubi8.ubi.abc123de"
+	testNamespace   = "default"
+	testPodName     = "test-pod"
+	testContainer   = "test-container"
+	testRegistry    = "registry.redhat.io"
+	testRepository  = "ubi8/ubi"
+	testExistingPod = "existing-pod"
+	testPublisher   = "Red Hat, Inc."
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -117,10 +121,10 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	if cr.Spec.ImageDigest != testDigest {
 		t.Errorf("ImageDigest = %v, want %v", cr.Spec.ImageDigest, testDigest)
 	}
-	if cr.Spec.Registry != "registry.redhat.io" {
+	if cr.Spec.Registry != testRegistry {
 		t.Errorf("Registry = %v, want registry.redhat.io", cr.Spec.Registry)
 	}
-	if cr.Spec.Repository != "ubi8/ubi" {
+	if cr.Spec.Repository != testRepository {
 		t.Errorf("Repository = %v, want ubi8/ubi", cr.Spec.Repository)
 	}
 
@@ -146,6 +150,11 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 	if got := cr.Labels[LabelDigest]; got != wantDigestLabel {
 		t.Errorf("Label %q = %q, want %q", LabelDigest, got, wantDigestLabel)
 	}
+
+	// Verify operator-version label is set
+	if got := cr.Labels[LabelOperatorVersion]; got == "" {
+		t.Error("Label LabelOperatorVersion is empty, want non-empty version string")
+	}
 }
 
 func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
@@ -161,8 +170,8 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
-			Registry:           "registry.redhat.io",
-			Repository:         "ubi8/ubi",
+			Registry:           testRegistry,
+			Repository:         testRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
@@ -170,7 +179,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 			PodReferences: []securityv1alpha1.PodReference{
 				{
 					Namespace: testNamespace,
-					Name:      "existing-pod",
+					Name:      testExistingPod,
 					Container: "existing-container",
 				},
 			},
@@ -240,6 +249,11 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	// Should now have 2 pod references
 	if len(cr.Status.PodReferences) != 2 {
 		t.Errorf("PodReferences count = %v, want 2", len(cr.Status.PodReferences))
+	}
+
+	// Verify operator-version label was added to the existing CR during update
+	if got := cr.Labels[LabelOperatorVersion]; got == "" {
+		t.Error("Label LabelOperatorVersion not set on existing CR after reconcile, want non-empty version")
 	}
 }
 
@@ -351,7 +365,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	// Create existing pod
 	existingPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-pod",
+			Name:      testExistingPod,
 			Namespace: testNamespace,
 		},
 		Status: corev1.PodStatus{
@@ -368,8 +382,8 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
-			Registry:           "registry.redhat.io",
-			Repository:         "ubi8/ubi",
+			Registry:           testRegistry,
+			Repository:         testRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
@@ -377,7 +391,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 			PodReferences: []securityv1alpha1.PodReference{
 				{
 					Namespace: testNamespace,
-					Name:      "existing-pod",
+					Name:      testExistingPod,
 					Container: "container1",
 				},
 				{
@@ -416,7 +430,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	if len(cr.Status.PodReferences) != 1 {
 		t.Errorf("PodReferences count = %v, want 1", len(cr.Status.PodReferences))
 	}
-	if cr.Status.PodReferences[0].Name != "existing-pod" {
+	if cr.Status.PodReferences[0].Name != testExistingPod {
 		t.Errorf("Remaining PodReference.Name = %v, want existing-pod", cr.Status.PodReferences[0].Name)
 	}
 }
@@ -461,7 +475,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        "sha256:abc12345abc12345abc12345abc12345abc12345abc12345abc12345abc12345",
 			FullImageReference: "registry.redhat.io/ubi9/ubi@sha256:abc12345",
-			Registry:           "registry.redhat.io",
+			Registry:           testRegistry,
 			Repository:         "ubi9/ubi",
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
@@ -497,8 +511,8 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        "sha256:recent123recent123recent123recent123recent123recent123recent123re",
 			FullImageReference: "registry.redhat.io/ubi8/ubi@sha256:recent123",
-			Registry:           "registry.redhat.io",
-			Repository:         "ubi8/ubi",
+			Registry:           testRegistry,
+			Repository:         testRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
@@ -516,7 +530,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 	mockPyxis := &MockPyxisClient{
 		CertData: &pyxis.CertificationData{
 			ProjectID:   "ubi9-ubi",
-			Publisher:   "Red Hat, Inc.",
+			Publisher:   testPublisher,
 			HealthIndex: "A",
 		},
 		Healthy: true,
@@ -591,8 +605,8 @@ func TestPodReconciler_RefreshSingleImage(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
-			Registry:           "registry.redhat.io",
-			Repository:         "ubi8/ubi",
+			Registry:           testRegistry,
+			Repository:         testRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
@@ -611,7 +625,7 @@ func TestPodReconciler_RefreshSingleImage(t *testing.T) {
 	mockPyxis := &MockPyxisClient{
 		CertData: &pyxis.CertificationData{
 			ProjectID:   "ubi8-container",
-			Publisher:   "Red Hat, Inc.",
+			Publisher:   testPublisher,
 			HealthIndex: "B",
 			Vulnerabilities: &pyxis.VulnerabilitySummary{
 				Critical:  1,
@@ -649,7 +663,7 @@ func TestPodReconciler_RefreshSingleImage(t *testing.T) {
 		t.Fatal("PyxisData should not be nil")
 	}
 
-	if updatedCR.Status.PyxisData.Publisher != "Red Hat, Inc." {
+	if updatedCR.Status.PyxisData.Publisher != testPublisher {
 		t.Errorf("Publisher = %v, want Red Hat, Inc.", updatedCR.Status.PyxisData.Publisher)
 	}
 
@@ -678,8 +692,8 @@ func TestPodReconciler_RefreshSingleImage_NotCertified(t *testing.T) {
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
-			Registry:           "registry.redhat.io",
-			Repository:         "ubi8/ubi",
+			Registry:           testRegistry,
+			Repository:         testRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeRedHat,

@@ -22,6 +22,15 @@ import (
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 )
 
+const (
+	testRegistryRedHat = "registry.redhat.io"
+	testRegistryQuay   = "quay.io"
+	testRegistryGHCR   = "ghcr.io"
+	testRegistryGCR    = "gcr.io"
+	testRepoUBI        = "ubi8/ubi"
+	testFullDigest     = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+)
+
 func TestParseImageID(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -42,27 +51,27 @@ func TestParseImageID(t *testing.T) {
 		{
 			name: "docker-pullable prefix with Red Hat registry",
 			imageID: "docker-pullable://registry.redhat.io/ubi8/ubi@" +
-				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				testFullDigest,
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:   "registry.redhat.io",
-				Repository: "ubi8/ubi",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   testRegistryRedHat,
+				Repository: testRepoUBI,
+				Digest:     testFullDigest,
 				FullReference: "registry.redhat.io/ubi8/ubi@" +
-					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+					testFullDigest,
 			},
 		},
 		{
 			name: "docker prefix",
 			imageID: "docker://quay.io/openshift/origin-cli@" +
-				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				testFullDigest,
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:   "quay.io",
+				Registry:   testRegistryQuay,
 				Repository: "openshift/origin-cli",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:     testFullDigest,
 				FullReference: "quay.io/openshift/origin-cli@" +
-					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+					testFullDigest,
 			},
 		},
 		{
@@ -70,9 +79,9 @@ func TestParseImageID(t *testing.T) {
 			imageID: "nginx@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "docker.io",
+				Registry:      registryDockerIO,
 				Repository:    "library/nginx",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:        testFullDigest,
 				FullReference: "nginx@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
@@ -81,37 +90,37 @@ func TestParseImageID(t *testing.T) {
 			imageID: "myuser/myimage@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:      "docker.io",
+				Registry:      registryDockerIO,
 				Repository:    "myuser/myimage",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:        testFullDigest,
 				FullReference: "myuser/myimage@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
 			name: "image with tag and digest",
 			imageID: "registry.redhat.io/ubi8/ubi:8.5@" +
-				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				testFullDigest,
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:   "registry.redhat.io",
-				Repository: "ubi8/ubi",
+				Registry:   testRegistryRedHat,
+				Repository: testRepoUBI,
 				Tag:        "8.5",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:     testFullDigest,
 				FullReference: "registry.redhat.io/ubi8/ubi:8.5@" +
-					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+					testFullDigest,
 			},
 		},
 		{
 			name: "ghcr.io image",
 			imageID: "ghcr.io/kubernetes-sigs/controller-runtime@" +
-				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				testFullDigest,
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:   "ghcr.io",
+				Registry:   testRegistryGHCR,
 				Repository: "kubernetes-sigs/controller-runtime",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:     testFullDigest,
 				FullReference: "ghcr.io/kubernetes-sigs/controller-runtime@" +
-					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+					testFullDigest,
 			},
 		},
 		{
@@ -121,21 +130,21 @@ func TestParseImageID(t *testing.T) {
 			wantRef: &Reference{
 				Registry:      "localhost:5000",
 				Repository:    "myimage",
-				Digest:        "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:        testFullDigest,
 				FullReference: "localhost:5000/myimage@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
 			},
 		},
 		{
 			name: "gcr.io image",
 			imageID: "gcr.io/google-containers/pause@" +
-				"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				testFullDigest,
 			wantErr: false,
 			wantRef: &Reference{
-				Registry:   "gcr.io",
+				Registry:   testRegistryGCR,
 				Repository: "google-containers/pause",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Digest:     testFullDigest,
 				FullReference: "gcr.io/google-containers/pause@" +
-					"sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+					testFullDigest,
 			},
 		},
 	}
@@ -178,16 +187,16 @@ func TestReferenceToCRName(t *testing.T) {
 		{
 			name: "Red Hat registry image",
 			ref: &Reference{
-				Registry:   "registry.redhat.io",
-				Repository: "ubi8/ubi",
-				Digest:     "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Registry:   testRegistryRedHat,
+				Repository: testRepoUBI,
+				Digest:     testFullDigest,
 			},
 			want: "registry.redhat.io.ubi8.ubi.abc123de",
 		},
 		{
 			name: "Quay.io image",
 			ref: &Reference{
-				Registry:   "quay.io",
+				Registry:   testRegistryQuay,
 				Repository: "openshift/origin-cli",
 				Digest:     "sha256:fedcba98765432fedcba98765432fedcba98765432fedcba98765432fedcba98",
 			},
@@ -196,7 +205,7 @@ func TestReferenceToCRName(t *testing.T) {
 		{
 			name: "Docker Hub library image",
 			ref: &Reference{
-				Registry:   "docker.io",
+				Registry:   registryDockerIO,
 				Repository: "library/nginx",
 				Digest:     "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 			},
@@ -205,7 +214,7 @@ func TestReferenceToCRName(t *testing.T) {
 		{
 			name: "Deep nested repository",
 			ref: &Reference{
-				Registry:   "gcr.io",
+				Registry:   testRegistryGCR,
 				Repository: "google-containers/some/deep/path",
 				Digest:     "sha256:aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344",
 			},
@@ -228,19 +237,19 @@ func TestClassifyRegistry(t *testing.T) {
 		want     securityv1alpha1.RegistryType
 	}{
 		// Red Hat registries
-		{"registry.redhat.io", securityv1alpha1.RegistryTypeRedHat},
+		{testRegistryRedHat, securityv1alpha1.RegistryTypeRedHat},
 		{"registry.access.redhat.com", securityv1alpha1.RegistryTypeRedHat},
 		{"registry.connect.redhat.com", securityv1alpha1.RegistryTypeRedHat},
 		{"REGISTRY.REDHAT.IO", securityv1alpha1.RegistryTypeRedHat}, // Case insensitive
 
 		// Partner registry
-		{"quay.io", securityv1alpha1.RegistryTypePartner},
+		{testRegistryQuay, securityv1alpha1.RegistryTypePartner},
 		{"QUAY.IO", securityv1alpha1.RegistryTypePartner},
 
 		// Community registries
-		{"docker.io", securityv1alpha1.RegistryTypeCommunity},
-		{"ghcr.io", securityv1alpha1.RegistryTypeCommunity},
-		{"gcr.io", securityv1alpha1.RegistryTypeCommunity},
+		{registryDockerIO, securityv1alpha1.RegistryTypeCommunity},
+		{testRegistryGHCR, securityv1alpha1.RegistryTypeCommunity},
+		{testRegistryGCR, securityv1alpha1.RegistryTypeCommunity},
 		{"registry.k8s.io", securityv1alpha1.RegistryTypeCommunity},
 		{"k8s.gcr.io", securityv1alpha1.RegistryTypeCommunity},
 
@@ -270,12 +279,12 @@ func TestIsRedHatRegistry(t *testing.T) {
 		registry string
 		want     bool
 	}{
-		{"registry.redhat.io", true},
+		{testRegistryRedHat, true},
 		{"registry.access.redhat.com", true},
 		{"registry.connect.redhat.com", true},
-		{"quay.io", false},
-		{"docker.io", false},
-		{"ghcr.io", false},
+		{testRegistryQuay, false},
+		{registryDockerIO, false},
+		{testRegistryGHCR, false},
 	}
 
 	for _, tt := range tests {
