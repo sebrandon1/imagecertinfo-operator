@@ -620,7 +620,7 @@ func (r *PodReconciler) enrichQuayManifest(ctx context.Context, cr *securityv1al
 	}
 
 	cr.Status.QuayData.LayerCount = len(manifest.Layers)
-	cr.Status.QuayData.CompressedSizeBytes = manifest.Size
+	cr.Status.QuayData.CompressedSizeBytes = manifest.LayersCompressedSize
 	cr.Status.QuayData.IsManifestList = manifest.IsManifestList
 }
 
