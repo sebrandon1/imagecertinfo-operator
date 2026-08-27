@@ -231,6 +231,39 @@ var (
 		},
 		[]string{labelResult},
 	)
+
+	// Quay.io API Metrics
+
+	// QuayRequestsTotal tracks total Quay.io API requests
+	QuayRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "quay_requests_total",
+			Help:      "Total number of Quay.io API requests",
+		},
+		[]string{labelStatus, labelEndpoint},
+	)
+
+	// QuayRequestDuration tracks Quay.io API request duration
+	QuayRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: MetricsNamespace,
+			Name:      "quay_request_duration_seconds",
+			Help:      "Duration of Quay.io API requests in seconds",
+			Buckets:   []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{labelEndpoint},
+	)
+
+	// QuayCacheHits tracks cache hit/miss ratio
+	QuayCacheHits = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "quay_cache_hits_total",
+			Help:      "Total number of Quay.io cache hits and misses",
+		},
+		[]string{labelResult},
+	)
 )
 
 func init() {
@@ -261,6 +294,10 @@ func init() {
 		DockerHubRequestsTotal,
 		DockerHubRequestDuration,
 		DockerHubCacheHits,
+		// Quay.io API metrics
+		QuayRequestsTotal,
+		QuayRequestDuration,
+		QuayCacheHits,
 	)
 }
 
@@ -321,4 +358,20 @@ func RecordDockerHubCacheHit() {
 // RecordDockerHubCacheMiss records a Docker Hub cache miss
 func RecordDockerHubCacheMiss() {
 	DockerHubCacheHits.WithLabelValues("miss").Inc()
+}
+
+// RecordQuayRequest records a Quay.io API request metric
+func RecordQuayRequest(status, endpoint string, durationSeconds float64) {
+	QuayRequestsTotal.WithLabelValues(status, endpoint).Inc()
+	QuayRequestDuration.WithLabelValues(endpoint).Observe(durationSeconds)
+}
+
+// RecordQuayCacheHit records a Quay.io cache hit
+func RecordQuayCacheHit() {
+	QuayCacheHits.WithLabelValues("hit").Inc()
+}
+
+// RecordQuayCacheMiss records a Quay.io cache miss
+func RecordQuayCacheMiss() {
+	QuayCacheHits.WithLabelValues("miss").Inc()
 }

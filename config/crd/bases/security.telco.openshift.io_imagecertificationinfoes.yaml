@@ -350,6 +350,99 @@ spec:
                         type: integer
                     type: object
                 type: object
+              quayData:
+                description: QuayData contains metadata from Quay.io (only populated
+                  for quay.io images)
+                properties:
+                  architecture:
+                    description: Architecture is the image architecture from OCI labels
+                    type: string
+                  buildDate:
+                    description: BuildDate is the image build date from OCI labels
+                    type: string
+                  compressedSizeBytes:
+                    description: CompressedSizeBytes is the total compressed size
+                      of all layers
+                    format: int64
+                    type: integer
+                  daysSinceUpdate:
+                    description: DaysSinceUpdate is the computed days since the most
+                      recent tag was modified
+                    type: integer
+                  description:
+                    description: Description is the repository description
+                    type: string
+                  fixableVulnerabilities:
+                    description: FixableVulnerabilities is the number of vulnerabilities
+                      with a known fix
+                    type: integer
+                  isManifestList:
+                    description: IsManifestList indicates whether this is a multi-arch
+                      manifest list
+                    type: boolean
+                  isOrganization:
+                    description: IsOrganization indicates whether the repository belongs
+                      to an organization
+                    type: boolean
+                  isPublic:
+                    description: IsPublic indicates whether the repository is publicly
+                      visible
+                    type: boolean
+                  lastModified:
+                    description: LastModified is the most recent tag modification
+                      time
+                    format: date-time
+                    type: string
+                  layerCount:
+                    description: LayerCount is the number of layers in the image manifest
+                    type: integer
+                  licenseURL:
+                    description: LicenseURL is the license terms URL from OCI labels
+                    type: string
+                  securityScanStatus:
+                    description: SecurityScanStatus is the Clair scan status (scanned,
+                      queued, unsupported, failed)
+                    type: string
+                  state:
+                    description: State is the repository state (e.g., "NORMAL", "READ_ONLY",
+                      "MIRROR")
+                    type: string
+                  tagCount:
+                    description: TagCount is the number of tags in the repository
+                    type: integer
+                  totalVulnerabilities:
+                    description: TotalVulnerabilities is the total number of vulnerabilities
+                      found
+                    type: integer
+                  trustEnabled:
+                    description: TrustEnabled indicates whether content trust (signing)
+                      is enabled
+                    type: boolean
+                  vcsRef:
+                    description: VCSRef is the source control reference (git commit)
+                      from OCI labels
+                    type: string
+                  vendor:
+                    description: Vendor is the image vendor from OCI labels
+                    type: string
+                  vulnerabilities:
+                    description: Vulnerabilities contains vulnerability counts by
+                      severity from Clair scanning
+                    properties:
+                      critical:
+                        description: Critical vulnerability count
+                        type: integer
+                      important:
+                        description: Important vulnerability count
+                        type: integer
+                      low:
+                        description: Low vulnerability count
+                        type: integer
+                      moderate:
+                        description: Moderate vulnerability count
+                        type: integer
+                    type: object
+                type: object
               registryType:
                 default: Unknown
                 description: RegistryType indicates the type of registry (RedHat,

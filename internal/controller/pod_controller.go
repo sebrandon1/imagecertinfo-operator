@@ -38,6 +38,8 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
+
+	quaylib "github.com/sebrandon1/go-quay/lib"
 )
 
 // Event reasons for Kubernetes events
@@ -52,6 +54,7 @@ const (
 // Registry constants
 const (
 	RegistryDockerHub = "docker.io"
+	RegistryQuayIO    = "quay.io"
 )
 
 // Annotation keys
@@ -85,6 +88,7 @@ type PodReconciler struct {
 	Scheme          *runtime.Scheme
 	PyxisClient     pyxis.Client
 	DockerHubClient dockerhub.Client
+	QuayClient      quaylib.RepositoryReader
 	Recorder        record.EventRecorder
 }
 
@@ -240,6 +244,11 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 	// If Docker Hub client is available and this is docker.io, enrich with Docker Hub data
 	if r.DockerHubClient != nil && ref.Registry == RegistryDockerHub {
 		go r.checkDockerHubData(context.Background(), cr.Name, ref)
+	}
+
+	// If Quay client is available and this is quay.io, enrich with Quay data
+	if r.QuayClient != nil && ref.Registry == RegistryQuayIO {
+		go r.checkQuayData(context.Background(), cr.Name, ref)
 	}
 
 	return nil
@@ -434,6 +443,221 @@ func (r *PodReconciler) updateCRWithDockerHubData(cr *securityv1alpha1.ImageCert
 	}
 }
 
+// checkQuayData queries the Quay.io API for repository metadata
+func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *image.Reference) {
+	logger := log.FromContext(ctx).WithValues("crName", crName)
+
+	if r.QuayClient == nil {
+		return
+	}
+
+	namespace, repo := parseQuayRepo(ref.Repository)
+
+	start := time.Now()
+	repoInfo, err := r.QuayClient.GetRepository(ctx, namespace, repo)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordQuayRequest("error", "repository", duration)
+		logger.Error(err, "failed to query Quay.io API")
+		return
+	}
+
+	metrics.RecordQuayRequest("success", "repository", duration)
+
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		logger.Error(err, "failed to get ImageCertificationInfo for Quay update")
+		return
+	}
+
+	r.updateCRWithQuayData(&cr, &repoInfo)
+
+	// Security scan enrichment (best-effort)
+	var cves []string
+	if ref.Digest != "" {
+		cves = r.enrichQuaySecurity(ctx, &cr, namespace, repo, ref.Digest)
+		r.enrichQuayManifest(ctx, &cr, namespace, repo, ref.Digest)
+		r.enrichQuayLabels(ctx, &cr, namespace, repo, ref.Digest)
+	}
+
+	if err := r.Status().Update(ctx, &cr); err != nil {
+		logger.Error(err, "failed to update ImageCertificationInfo with Quay data")
+		return
+	}
+
+	// Emit vulnerability events and CVE annotations after status update
+	if cr.Status.QuayData != nil && cr.Status.QuayData.Vulnerabilities != nil {
+		vulns := cr.Status.QuayData.Vulnerabilities
+		if vulns.Critical > 0 || vulns.Important > 0 {
+			if r.Recorder != nil {
+				r.Recorder.Event(&cr, corev1.EventTypeWarning, EventReasonVulnerabilitiesFound,
+					fmt.Sprintf("Quay security scan found %d critical, %d important vulnerabilities",
+						vulns.Critical, vulns.Important))
+				metrics.RecordEvent(corev1.EventTypeWarning, EventReasonVulnerabilitiesFound)
+			}
+		}
+	}
+
+	if len(cves) > 0 {
+		if updateErr := r.updateCVEAnnotations(ctx, crName, cves); updateErr != nil {
+			logger.Error(updateErr, "failed to update CVE annotations")
+		}
+	}
+}
+
+// parseQuayRepo parses a repository path into namespace and repository name
+func parseQuayRepo(repository string) (namespace, repo string) {
+	parts := strings.SplitN(repository, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return repository, repository
+}
+
+func (r *PodReconciler) updateCRWithQuayData(cr *securityv1alpha1.ImageCertificationInfo, repo *quaylib.RepositoryWithTags) {
+	quayData := cr.Status.QuayData
+	if quayData == nil {
+		quayData = &securityv1alpha1.QuayData{}
+	}
+
+	quayData.IsPublic = repo.IsPublic
+	quayData.IsOrganization = repo.IsOrganization
+	quayData.TrustEnabled = repo.TrustEnabled
+	quayData.State = repo.State
+	quayData.Description = repo.Description
+	quayData.TagCount = len(repo.Tags.Tags)
+
+	latest := repo.LatestTagTimestamp()
+	if !latest.IsZero() {
+		daysSince := quaylib.CalculateDaysSince(latest)
+		quayData.LastModified = &metav1.Time{Time: latest}
+		quayData.DaysSinceUpdate = &daysSince
+	}
+
+	cr.Status.QuayData = quayData
+}
+
+func (r *PodReconciler) enrichQuaySecurity(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) []string {
+	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
+
+	start := time.Now()
+	scan, err := r.QuayClient.GetManifestSecurity(ctx, namespace, repo, digest, true)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordQuayRequest("error", "security", duration)
+		logger.V(1).Info("failed to query Quay security scan", "error", err)
+		return nil
+	}
+
+	metrics.RecordQuayRequest("success", "security", duration)
+
+	if scan == nil {
+		return nil
+	}
+
+	cr.Status.QuayData.SecurityScanStatus = scan.Status
+
+	if scan.Data == nil || scan.Data.Layer == nil {
+		return nil
+	}
+
+	var critical, important, moderate, low, total, fixable int
+	var cves []string
+
+	for i := range scan.Data.Layer.Features {
+		for j := range scan.Data.Layer.Features[i].Vulnerabilities {
+			vuln := &scan.Data.Layer.Features[i].Vulnerabilities[j]
+			total++
+			if vuln.FixedBy != "" {
+				fixable++
+			}
+
+			switch vuln.Severity {
+			case "Critical":
+				critical++
+				cves = append(cves, vuln.Name)
+			case "High":
+				important++
+			case "Medium":
+				moderate++
+			case "Low":
+				low++
+			}
+		}
+	}
+
+	cr.Status.QuayData.Vulnerabilities = &securityv1alpha1.VulnerabilitySummary{
+		Critical:  critical,
+		Important: important,
+		Moderate:  moderate,
+		Low:       low,
+	}
+	cr.Status.QuayData.TotalVulnerabilities = total
+	cr.Status.QuayData.FixableVulnerabilities = fixable
+
+	return cves
+}
+
+func (r *PodReconciler) enrichQuayManifest(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) {
+	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
+
+	start := time.Now()
+	manifest, err := r.QuayClient.GetManifest(ctx, namespace, repo, digest)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordQuayRequest("error", "manifest", duration)
+		logger.V(1).Info("failed to query Quay manifest", "error", err)
+		return
+	}
+
+	metrics.RecordQuayRequest("success", "manifest", duration)
+
+	if manifest == nil {
+		return
+	}
+
+	cr.Status.QuayData.LayerCount = len(manifest.Layers)
+	cr.Status.QuayData.CompressedSizeBytes = manifest.LayersCompressedSize
+	cr.Status.QuayData.IsManifestList = manifest.IsManifestList
+}
+
+var quayLabelKeys = map[string]func(*securityv1alpha1.QuayData, string){
+	"vendor":                   func(q *securityv1alpha1.QuayData, v string) { q.Vendor = v },
+	"architecture":             func(q *securityv1alpha1.QuayData, v string) { q.Architecture = v },
+	"build-date":               func(q *securityv1alpha1.QuayData, v string) { q.BuildDate = v },
+	"com.redhat.license_terms": func(q *securityv1alpha1.QuayData, v string) { q.LicenseURL = v },
+	"vcs-ref":                  func(q *securityv1alpha1.QuayData, v string) { q.VCSRef = v },
+}
+
+func (r *PodReconciler) enrichQuayLabels(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) {
+	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
+
+	start := time.Now()
+	labels, err := r.QuayClient.GetManifestLabels(ctx, namespace, repo, digest)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordQuayRequest("error", "labels", duration)
+		logger.V(1).Info("failed to query Quay manifest labels", "error", err)
+		return
+	}
+
+	metrics.RecordQuayRequest("success", "labels", duration)
+
+	if labels == nil {
+		return
+	}
+
+	for i := range labels.Labels {
+		if setter, ok := quayLabelKeys[labels.Labels[i].Key]; ok {
+			setter(cr.Status.QuayData, labels.Labels[i].Value)
+		}
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -562,9 +786,10 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 		// Determine which API to use based on stored registry type
 		isRedHatRegistry := cr.Status.RegistryType == securityv1alpha1.RegistryTypeRedHat
 		isDockerHub := cr.Spec.Registry == RegistryDockerHub
+		isQuayIO := cr.Spec.Registry == RegistryQuayIO
 
 		// Skip if no enrichment is possible
-		if !isRedHatRegistry && !isDockerHub {
+		if !isRedHatRegistry && !isDockerHub && !isQuayIO {
 			skipped++
 			continue
 		}
@@ -651,6 +876,21 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 
 		if repoInfo != nil {
 			r.updateCRWithDockerHubData(&latestCR, repoInfo)
+		}
+	} else if cr.Spec.Registry == RegistryQuayIO && r.QuayClient != nil {
+		namespace, repo := parseQuayRepo(cr.Spec.Repository)
+		repoInfo, err := r.QuayClient.GetRepository(ctx, namespace, repo)
+		if err != nil {
+			logger.Error(err, "failed to query Quay.io API during refresh")
+			return err
+		}
+
+		r.updateCRWithQuayData(&latestCR, &repoInfo)
+
+		if cr.Spec.ImageDigest != "" {
+			cves = r.enrichQuaySecurity(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			r.enrichQuayManifest(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			r.enrichQuayLabels(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
 		}
 	} else {
 		// No client available for this registry
@@ -775,6 +1015,10 @@ func snapshotImageState(cr *securityv1alpha1.ImageCertificationInfo) imageStateS
 			s.CriticalVulns = cr.Status.PyxisData.Vulnerabilities.Critical
 			s.ImportantVulns = cr.Status.PyxisData.Vulnerabilities.Important
 		}
+	}
+	if cr.Status.QuayData != nil && cr.Status.QuayData.Vulnerabilities != nil {
+		s.CriticalVulns += cr.Status.QuayData.Vulnerabilities.Critical
+		s.ImportantVulns += cr.Status.QuayData.Vulnerabilities.Important
 	}
 	return s
 }
