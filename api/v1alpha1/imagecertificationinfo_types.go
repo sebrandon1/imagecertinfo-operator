@@ -203,6 +203,54 @@ type QuayData struct {
 	// TagCount is the number of tags in the repository
 	// +optional
 	TagCount int `json:"tagCount,omitempty"`
+
+	// SecurityScanStatus is the Clair scan status (scanned, queued, unsupported, failed)
+	// +optional
+	SecurityScanStatus string `json:"securityScanStatus,omitempty"`
+
+	// Vulnerabilities contains vulnerability counts by severity from Clair scanning
+	// +optional
+	Vulnerabilities *VulnerabilitySummary `json:"vulnerabilities,omitempty"`
+
+	// TotalVulnerabilities is the total number of vulnerabilities found
+	// +optional
+	TotalVulnerabilities int `json:"totalVulnerabilities,omitempty"`
+
+	// FixableVulnerabilities is the number of vulnerabilities with a known fix
+	// +optional
+	FixableVulnerabilities int `json:"fixableVulnerabilities,omitempty"`
+
+	// Vendor is the image vendor from OCI labels
+	// +optional
+	Vendor string `json:"vendor,omitempty"`
+
+	// Architecture is the image architecture from OCI labels
+	// +optional
+	Architecture string `json:"architecture,omitempty"`
+
+	// BuildDate is the image build date from OCI labels
+	// +optional
+	BuildDate string `json:"buildDate,omitempty"`
+
+	// LicenseURL is the license terms URL from OCI labels
+	// +optional
+	LicenseURL string `json:"licenseURL,omitempty"`
+
+	// VCSRef is the source control reference (git commit) from OCI labels
+	// +optional
+	VCSRef string `json:"vcsRef,omitempty"`
+
+	// LayerCount is the number of layers in the image manifest
+	// +optional
+	LayerCount int `json:"layerCount,omitempty"`
+
+	// CompressedSizeBytes is the total compressed size of all layers
+	// +optional
+	CompressedSizeBytes int64 `json:"compressedSizeBytes,omitempty"`
+
+	// IsManifestList indicates whether this is a multi-arch manifest list
+	// +optional
+	IsManifestList bool `json:"isManifestList,omitempty"`
 }
 
 // ImageCertificationInfoSpec defines the desired state of ImageCertificationInfo

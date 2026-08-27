@@ -131,6 +131,8 @@ github.com/sebrandon1/go-quay v1.1.2-0.20260826231848-431b36c7412a h1:4iM+72ANVU
 github.com/sebrandon1/go-quay v1.1.2-0.20260826231848-431b36c7412a/go.mod h1:S49HlAXfeVCn6M/pML6Dvq33ihsd3oKX1paSBXjJ49k=
 github.com/sebrandon1/go-quay v1.1.2 h1:KC34ETpuUtf/+LRnNuVOuZ8+fzRxvgyPHyvwKiugP/s=
 github.com/sebrandon1/go-quay v1.1.2/go.mod h1:S49HlAXfeVCn6M/pML6Dvq33ihsd3oKX1paSBXjJ49k=
+github.com/sebrandon1/go-quay v1.1.3-0.20260827024057-96b92ccf93d5 h1:h1k0ACg1EsBFz8CA/ONp/iRS36QpjqsY5q/G+enIUfU=
+github.com/sebrandon1/go-quay v1.1.3-0.20260827024057-96b92ccf93d5/go.mod h1:S49HlAXfeVCn6M/pML6Dvq33ihsd3oKX1paSBXjJ49k=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9 h1:9exaQaMOCwffKiiiYk6/BndUBv+iRViNW+4lEMi0PvY=
