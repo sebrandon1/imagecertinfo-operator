@@ -35,6 +35,8 @@ import (
 // testNamespace is where test pods are deployed
 const testNamespace = "certification-test"
 
+const secondaryTestNamespace = "certification-secondary-test"
+
 // operatorNamespace is where the operator is deployed
 const operatorNamespace = "imagecertinfo-operator-system"
 
@@ -81,8 +83,16 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create test namespace")
 
+		By("creating secondary test namespace")
+		cmd = exec.Command("kubectl", "create", "ns", secondaryTestNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create secondary test namespace")
+
 		By("labeling the test namespace to enforce the restricted security policy")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", testNamespace,
+			"pod-security.kubernetes.io/enforce=restricted")
+		_, _ = utils.Run(cmd) // Ignore error, may not be supported on all clusters
+		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", secondaryTestNamespace,
 			"pod-security.kubernetes.io/enforce=restricted")
 		_, _ = utils.Run(cmd) // Ignore error, may not be supported on all clusters
 	})
@@ -90,6 +100,8 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 	AfterAll(func() {
 		By("cleaning up test namespace")
 		cmd := exec.Command("kubectl", "delete", "ns", testNamespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "ns", secondaryTestNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -411,6 +423,68 @@ var _ = Describe("Image Certification Detection", Label("Nightly", "Certificatio
 					hex := strings.TrimPrefix(label, "sha256-")
 					g.Expect(hex).NotTo(BeEmpty(), "digest hex must not be empty")
 				}
+			}).Should(Succeed())
+		})
+	})
+
+	Context("When the same image is deployed in multiple namespaces", func() {
+		const podName = "certified-secondary-test-pod"
+
+		BeforeAll(func() {
+			By("deploying the certified image in a second namespace")
+			Expect(deployPod(secondaryTestNamespace, podName, certifiedImage)).To(Succeed())
+
+			By("waiting for the secondary pod to be running")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", podName, "-n", secondaryTestNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running"))
+			}).Should(Succeed())
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "pod", podName, "-n", secondaryTestNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should preserve both pod namespaces in one ImageCertificationInfo", func() {
+			By("checking the certified image pod references")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "imagecertificationinfoes", "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				var iciList struct {
+					Items []struct {
+						Spec struct {
+							Registry string `json:"registry"`
+						} `json:"spec"`
+						Status struct {
+							PodReferences []struct {
+								Namespace string `json:"namespace"`
+								Name      string `json:"name"`
+							} `json:"podReferences"`
+						} `json:"status"`
+					} `json:"items"`
+				}
+				g.Expect(json.Unmarshal([]byte(output), &iciList)).To(Succeed())
+
+				for _, ici := range iciList.Items {
+					if strings.Contains(ici.Spec.Registry, "registry.access.redhat.com") {
+						foundNamespaces := map[string]bool{}
+						for _, ref := range ici.Status.PodReferences {
+							if ref.Name == "certified-test-pod" || ref.Name == podName {
+								foundNamespaces[ref.Namespace] = true
+							}
+						}
+						g.Expect(foundNamespaces).To(HaveKey(testNamespace))
+						g.Expect(foundNamespaces).To(HaveKey(secondaryTestNamespace))
+						return
+					}
+				}
+				Fail("ImageCertificationInfo for registry.access.redhat.com not found")
 			}).Should(Succeed())
 		})
 	})

@@ -20,12 +20,42 @@ limitations under the License.
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sebrandon1/imagecertinfo-operator/test/utils"
 )
+
+func deployPod(namespace, name, image string) error {
+	podSpec := fmt.Sprintf(`{
+		"apiVersion": "v1",
+		"kind": "Pod",
+		"metadata": {"name": "%s", "namespace": "%s"},
+		"spec": {
+			"containers": [{
+				"name": "image",
+				"image": "%s",
+				"command": ["sleep", "3600"],
+				"securityContext": {
+					"readOnlyRootFilesystem": true,
+					"allowPrivilegeEscalation": false,
+					"capabilities": {"drop": ["ALL"]},
+					"runAsNonRoot": true,
+					"runAsUser": 1000,
+					"seccompProfile": {"type": "RuntimeDefault"}
+				}
+			}],
+			"restartPolicy": "Never"
+		}
+	}`, name, namespace, image)
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(podSpec)
+	_, err := utils.Run(cmd)
+	return err
+}
 
 // ClusterType represents the type of Kubernetes cluster
 type ClusterType string
