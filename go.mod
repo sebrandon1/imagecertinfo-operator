@@ -6,8 +6,9 @@ toolchain go1.26.5
 
 require (
 	github.com/onsi/ginkgo/v2 v2.32.1
-	github.com/onsi/gomega v1.42.1
+	github.com/onsi/gomega v1.43.0
 	github.com/prometheus/client_golang v1.24.1
+	github.com/sebrandon1/go-quay v1.1.3
 	golang.org/x/time v0.15.0
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
@@ -53,7 +54,6 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
-	github.com/sebrandon1/go-quay v1.1.3 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
