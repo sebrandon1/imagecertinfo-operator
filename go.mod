@@ -8,7 +8,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.43.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/sebrandon1/go-quay v1.1.3
+	github.com/sebrandon1/go-quay v1.1.4
 	golang.org/x/time v0.15.0
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0
