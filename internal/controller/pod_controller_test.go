@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -60,10 +59,8 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 
 	// Create a test pod with container status
 	testPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testPodName,
-			Namespace: testNamespace,
-		},
+		Name:      testPodName,
+		Namespace: testNamespace,
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -96,10 +93,8 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 
 	// Reconcile the pod
 	req := reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      testPodName,
-			Namespace: testNamespace,
-		},
+		Name:      testPodName,
+		Namespace: testNamespace,
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
@@ -164,9 +159,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 	// Create existing ImageCertificationInfo
 	now := metav1.Now()
 	existingCR := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testCRName,
-		},
+		Name: testCRName,
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
@@ -190,10 +183,8 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 
 	// Create a new pod that uses the same image
 	newPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "new-pod",
-			Namespace: testNamespace,
-		},
+		Name:      "new-pod",
+		Namespace: testNamespace,
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -226,10 +217,8 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 
 	// Reconcile the new pod
 	req := reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "new-pod",
-			Namespace: testNamespace,
-		},
+		Name:      "new-pod",
+		Namespace: testNamespace,
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
@@ -272,10 +261,8 @@ func TestPodReconciler_Reconcile_DeletedPod(t *testing.T) {
 
 	// Reconcile a non-existent pod
 	req := reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "deleted-pod",
-			Namespace: testNamespace,
-		},
+		Name:      "deleted-pod",
+		Namespace: testNamespace,
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
@@ -293,10 +280,8 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 
 	// Create a pod that is not running
 	completedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "completed-pod",
-			Namespace: testNamespace,
-		},
+		Name:      "completed-pod",
+		Namespace: testNamespace,
 		Status: corev1.PodStatus{
 			Phase: corev1.PodSucceeded,
 		},
@@ -313,10 +298,8 @@ func TestPodReconciler_Reconcile_PodNotRunning(t *testing.T) {
 	}
 
 	req := reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "completed-pod",
-			Namespace: testNamespace,
-		},
+		Name:      "completed-pod",
+		Namespace: testNamespace,
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
@@ -364,10 +347,8 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 
 	// Create existing pod
 	existingPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testExistingPod,
-			Namespace: testNamespace,
-		},
+		Name:      testExistingPod,
+		Namespace: testNamespace,
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 		},
@@ -376,9 +357,7 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	// Create ImageCertificationInfo with references to existing and deleted pods
 	now := metav1.Now()
 	existingCR := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testCRName,
-		},
+		Name: testCRName,
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
@@ -469,9 +448,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 	// Create ImageCertificationInfo for a Red Hat image (should be refreshed)
 	oldCheckTime := metav1.NewTime(time.Now().Add(-2 * time.Hour)) // Checked 2 hours ago
 	redHatCR := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "registry.redhat.io.ubi9.ubi.abc12345",
-		},
+		Name: "registry.redhat.io.ubi9.ubi.abc12345",
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        "sha256:abc12345abc12345abc12345abc12345abc12345abc12345abc12345abc12345",
 			FullImageReference: "registry.redhat.io/ubi9/ubi@sha256:abc12345",
@@ -487,9 +464,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 
 	// Create ImageCertificationInfo for a non-Red Hat image (should be skipped)
 	dockerCR := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "docker.io.library.nginx.def67890",
-		},
+		Name: "docker.io.library.nginx.def67890",
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        "sha256:def67890def67890def67890def67890def67890def67890def67890def67890",
 			FullImageReference: "docker.io/library/nginx@sha256:def67890",
@@ -505,9 +480,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 	// Create a Red Hat CR that was recently checked (should be skipped)
 	recentCheckTime := metav1.NewTime(time.Now().Add(-30 * time.Minute))
 	recentCR := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "registry.redhat.io.ubi8.ubi.recent123",
-		},
+		Name: "registry.redhat.io.ubi8.ubi.recent123",
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        "sha256:recent123recent123recent123recent123recent123recent123recent123re",
 			FullImageReference: "registry.redhat.io/ubi8/ubi@sha256:recent123",
@@ -599,9 +572,7 @@ func TestPodReconciler_RefreshSingleImage(t *testing.T) {
 
 	now := metav1.Now()
 	cr := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testCRName,
-		},
+		Name: testCRName,
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
@@ -686,9 +657,7 @@ func TestPodReconciler_RefreshSingleImage_NotCertified(t *testing.T) {
 
 	now := metav1.Now()
 	cr := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testCRName,
-		},
+		Name: testCRName,
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        testDigest,
 			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,

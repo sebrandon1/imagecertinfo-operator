@@ -183,12 +183,10 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 	registryType := image.ClassifyRegistry(ref.Registry)
 
 	cr := &securityv1alpha1.ImageCertificationInfo{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: crName,
-			Labels: map[string]string{
-				LabelDigest:          digestLabel(ref.Digest),
-				LabelOperatorVersion: version.Version,
-			},
+		Name: crName,
+		Labels: map[string]string{
+			LabelDigest:          digestLabel(ref.Digest),
+			LabelOperatorVersion: version.Version,
 		},
 		Spec: securityv1alpha1.ImageCertificationInfoSpec{
 			ImageDigest:        ref.Digest,
