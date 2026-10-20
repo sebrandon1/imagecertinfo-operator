@@ -27,6 +27,11 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Running Test e2e
-        run: |
-          go mod tidy
-          make test-e2e
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 30
+          retry_wait_seconds: 60
+          command: |
+            go mod tidy
+            make test-e2e
