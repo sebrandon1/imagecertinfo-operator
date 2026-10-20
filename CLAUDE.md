@@ -65,7 +65,7 @@ make build-installer IMG=<img> # Generate dist/install.yaml
 
 ## Requirements
 
-- Go 1.26+
+- Go 1.27+
 
 ## Development Rules
 
