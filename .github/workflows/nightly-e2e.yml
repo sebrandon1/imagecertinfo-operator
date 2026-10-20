@@ -60,8 +60,13 @@ jobs:
           kubectl wait --for=condition=available --timeout=120s deployment/imagecertinfo-operator-controller-manager -n imagecertinfo-operator-system
 
       - name: Run nightly e2e tests
-        run: |
-          make test-e2e-nightly CLUSTER_TYPE=kubernetes
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 60
+          retry_wait_seconds: 60
+          command: |
+            make test-e2e-nightly CLUSTER_TYPE=kubernetes
 
       - name: Collect logs on failure
         if: failure()
@@ -136,10 +141,15 @@ jobs:
 
       - name: Push to OpenShift registry
         if: ${{ env.SKIP_OCP != 'true' }}
-        run: |
-          # Create the namespace first so we can push to it
-          oc create namespace imagecertinfo-operator-system --dry-run=client -o yaml | oc apply -f -
-          docker push ${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 30
+          command: |
+            # Create the namespace first so we can push to it
+            oc create namespace imagecertinfo-operator-system --dry-run=client -o yaml | oc apply -f -
+            docker push ${REGISTRY_HOST}/imagecertinfo-operator-system/imagecertinfo-operator:test
 
       - name: Deploy operator
         if: ${{ env.SKIP_OCP != 'true' }}
@@ -154,8 +164,13 @@ jobs:
 
       - name: Run nightly e2e tests
         if: ${{ env.SKIP_OCP != 'true' }}
-        run: |
-          make test-e2e-nightly CLUSTER_TYPE=openshift
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 60
+          retry_wait_seconds: 60
+          command: |
+            make test-e2e-nightly CLUSTER_TYPE=openshift
 
       - name: Collect logs on failure
         if: ${{ failure() && env.SKIP_OCP != 'true' }}
