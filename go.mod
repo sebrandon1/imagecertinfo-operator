@@ -6,7 +6,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
-	github.com/sebrandon1/go-quay v1.2.1
+	github.com/sebrandon1/go-quay v1.2.2
 	golang.org/x/time v0.16.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
@@ -81,7 +81,7 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
