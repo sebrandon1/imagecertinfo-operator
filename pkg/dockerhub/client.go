@@ -20,12 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
-	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
+	"github.com/sebrandon1/go-toolbox/httpx"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 )
 
 const (
@@ -47,7 +48,7 @@ type Client interface {
 // The Docker Hub public API works without authentication for read-only queries.
 type HTTPClient struct {
 	baseURL    string
-	httpClient *http.Client
+	httpClient *httpx.Client
 }
 
 // ClientOption is a function that configures an HTTPClient
@@ -57,20 +58,21 @@ type ClientOption func(*HTTPClient)
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *HTTPClient) {
 		c.baseURL = baseURL
+		c.httpClient.BaseURL = baseURL
 	}
 }
 
 // WithHTTPClient sets a custom HTTP client
 func WithHTTPClient(httpClient *http.Client) ClientOption {
 	return func(c *HTTPClient) {
-		c.httpClient = httpClient
+		c.httpClient.HTTPClient = httpClient
 	}
 }
 
 // WithTimeout sets a custom timeout
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *HTTPClient) {
-		c.httpClient.Timeout = timeout
+		c.httpClient.HTTPClient.Timeout = timeout
 	}
 }
 
@@ -79,9 +81,11 @@ func WithTimeout(timeout time.Duration) ClientOption {
 func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 	client := &HTTPClient{
 		baseURL: DefaultBaseURL,
-		httpClient: &http.Client{
+		httpClient: httpx.NewClient(httpx.Options{
+			BaseURL: DefaultBaseURL,
 			Timeout: DefaultTimeout,
-		},
+			Headers: http.Header{"Accept": {"application/json"}},
+		}),
 	}
 
 	for _, opt := range opts {
@@ -101,13 +105,10 @@ func (c *HTTPClient) GetRepositoryInfo(
 	// Build the request URL
 	requestURL := fmt.Sprintf("%s/repositories/%s/%s", c.baseURL, namespace, repository)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Set headers
-	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	duration := time.Since(start).Seconds()
@@ -128,12 +129,12 @@ func (c *HTTPClient) GetRepositoryInfo(
 		metrics.RecordDockerHubRequest("rate_limited", "repository", duration)
 		return nil, fmt.Errorf("rate limited by Docker Hub")
 	default:
-		body, _ := io.ReadAll(resp.Body)
+		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
 		metrics.RecordDockerHubRequest("error", "repository", duration)
-		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, string(body))
+		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, body)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -174,13 +175,11 @@ func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace strin
 
 	log.V(1).Info("checking verified publisher status", "namespace", namespace, "url", requestURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		log.V(1).Info("failed to create request", "namespace", namespace, "error", err)
 		return false
 	}
-
-	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -195,7 +194,7 @@ func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace strin
 		return false
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
 	if err != nil {
 		log.V(1).Info("failed to read response body", "namespace", namespace, "error", err)
 		return false
@@ -220,7 +219,7 @@ func (c *HTTPClient) IsHealthy(ctx context.Context) bool {
 	// so we check if we can access a known repository
 	requestURL := fmt.Sprintf("%s/repositories/library/alpine", c.baseURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, requestURL, nil)
+	req, err := c.httpClient.NewRequest(ctx, http.MethodHead, requestURL, nil)
 	if err != nil {
 		return false
 	}

@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	quaylib "github.com/sebrandon1/go-quay/lib"
+	"github.com/sebrandon1/go-toolbox/confkit"
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
@@ -173,12 +174,12 @@ func main() {
 	// Priority order for Pyxis API key: flag > env var > Secret
 	// Check for API key in environment variable if not set via flag
 	if pyxisAPIKey == "" {
-		pyxisAPIKey = os.Getenv("PYXIS_API_KEY")
+		pyxisAPIKey = confkit.EnvString("PYXIS_API_KEY", "")
 	}
 
 	// Determine secret namespace from flag or POD_NAMESPACE env var
 	if pyxisAPIKeySecretNamespace == "" {
-		pyxisAPIKeySecretNamespace = os.Getenv("POD_NAMESPACE")
+		pyxisAPIKeySecretNamespace = confkit.EnvString("POD_NAMESPACE", "")
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

@@ -20,10 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/sebrandon1/go-toolbox/httpx"
 
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
@@ -50,7 +51,7 @@ type Client interface {
 type HTTPClient struct {
 	baseURL    string
 	apiKey     string // Optional - public API works without auth
-	httpClient *http.Client
+	httpClient *httpx.Client
 }
 
 // ClientOption is a function that configures an HTTPClient
@@ -60,6 +61,7 @@ type ClientOption func(*HTTPClient)
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *HTTPClient) {
 		c.baseURL = baseURL
+		c.httpClient.BaseURL = baseURL
 	}
 }
 
@@ -69,20 +71,25 @@ func WithBaseURL(baseURL string) ClientOption {
 func WithAPIKey(apiKey string) ClientOption {
 	return func(c *HTTPClient) {
 		c.apiKey = apiKey
+		if apiKey != "" {
+			c.httpClient.Headers.Set("X-API-KEY", apiKey)
+		} else {
+			c.httpClient.Headers.Del("X-API-KEY")
+		}
 	}
 }
 
 // WithHTTPClient sets a custom HTTP client
 func WithHTTPClient(httpClient *http.Client) ClientOption {
 	return func(c *HTTPClient) {
-		c.httpClient = httpClient
+		c.httpClient.HTTPClient = httpClient
 	}
 }
 
 // WithTimeout sets a custom timeout
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *HTTPClient) {
-		c.httpClient.Timeout = timeout
+		c.httpClient.HTTPClient.Timeout = timeout
 	}
 }
 
@@ -92,9 +99,11 @@ func WithTimeout(timeout time.Duration) ClientOption {
 func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 	client := &HTTPClient{
 		baseURL: DefaultBaseURL,
-		httpClient: &http.Client{
+		httpClient: httpx.NewClient(httpx.Options{
+			BaseURL: DefaultBaseURL,
 			Timeout: DefaultTimeout,
-		},
+			Headers: http.Header{"Accept": {"application/json"}},
+		}),
 	}
 
 	for _, opt := range opts {
@@ -174,15 +183,9 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 func (c *HTTPClient) fetchAndParseResponse(
 	ctx context.Context, requestURL string,
 ) (*PyxisImageResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Accept", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("X-API-KEY", c.apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -200,11 +203,11 @@ func (c *HTTPClient) fetchAndParseResponse(
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, fmt.Errorf("authentication failed: %s", resp.Status)
 	default:
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, string(body))
+		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
+		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, body)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -381,33 +384,8 @@ func (c *HTTPClient) getRepositoryInfo(ctx context.Context, registry, repository
 	encodedRepo := url.PathEscape(repository)
 	requestURL := fmt.Sprintf("%s/repositories/registry/%s/repository/%s", c.baseURL, registry, encodedRepo)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil
-	}
-
-	req.Header.Set("Accept", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("X-API-KEY", c.apiKey)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
 	var repoResp PyxisContainerRepository
-	if err := json.Unmarshal(body, &repoResp); err != nil {
+	if err := c.httpClient.DoJSON(ctx, http.MethodGet, requestURL, nil, &repoResp); err != nil {
 		return nil
 	}
 
@@ -430,36 +408,11 @@ func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, image
 	start := time.Now()
 	requestURL := fmt.Sprintf("%s/images/id/%s/vulnerabilities", c.baseURL, imageID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, nil
-	}
-
-	req.Header.Set("Accept", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("X-API-KEY", c.apiKey)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	var vulnResp PyxisVulnerabilitiesResponse
+	err := c.httpClient.DoJSON(ctx, http.MethodGet, requestURL, nil, &vulnResp)
 	duration := time.Since(start).Seconds()
 	if err != nil {
 		metrics.RecordPyxisRequest("error", "vulnerabilities", duration)
-		return nil, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		metrics.RecordPyxisRequest("error", "vulnerabilities", duration)
-		return nil, nil
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil
-	}
-
-	var vulnResp PyxisVulnerabilitiesResponse
-	if err := json.Unmarshal(body, &vulnResp); err != nil {
 		return nil, nil
 	}
 
@@ -487,7 +440,7 @@ func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, image
 
 // IsHealthy checks if the Pyxis API is accessible
 func (c *HTTPClient) IsHealthy(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/ping", nil)
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, c.baseURL+"/ping", nil)
 	if err != nil {
 		return false
 	}
