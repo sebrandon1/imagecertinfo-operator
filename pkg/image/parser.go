@@ -17,6 +17,8 @@ limitations under the License.
 package image
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -127,12 +129,37 @@ func ReferenceToCRName(ref *Reference) string {
 	// Replace any remaining invalid characters with -
 	name = sanitizeK8sName(name)
 
-	// Ensure max length of 253 characters
-	if len(name) > 253 {
-		name = name[:253]
+	// Keep the readable form when it fits. Otherwise shorten it and add a hash
+	// of the untruncated name: a plain slice can end on '.' or '-' (invalid for
+	// an object name) and can collapse two long references onto the same name.
+	if len(name) > maxCRNameLength {
+		name = shortenCRName(name)
 	}
 
 	return name
+}
+
+const (
+	// maxCRNameLength is the DNS-1123 subdomain limit for object names.
+	maxCRNameLength = 253
+	// crNameHashSuffixLength is the "-" plus the 8 hex characters appended to a
+	// shortened name.
+	crNameHashSuffixLength = 9
+)
+
+// shortenCRName fits a sanitized name into maxCRNameLength and appends a hash
+// of the full name so distinct image references stay distinct.
+func shortenCRName(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	hash := hex.EncodeToString(sum[:])[:8]
+
+	// Re-sanitize the prefix so it cannot end on '.' or '-'.
+	prefix := sanitizeK8sName(name[:maxCRNameLength-crNameHashSuffixLength])
+	if prefix == "" {
+		return "image-" + hash
+	}
+
+	return prefix + "-" + hash
 }
 
 // sanitizeK8sName ensures the name is valid for Kubernetes resources
