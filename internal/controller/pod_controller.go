@@ -664,6 +664,19 @@ func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// RecomputeInventoryMetrics refreshes the image inventory gauges from the
+// current set of ImageCertificationInfo resources. The list is served from the
+// informer cache, so calling it on every cleanup and refresh cycle is cheap.
+func (r *PodReconciler) RecomputeInventoryMetrics(ctx context.Context) {
+	var crList securityv1alpha1.ImageCertificationInfoList
+	if err := r.List(ctx, &crList); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list ImageCertificationInfo for inventory metrics")
+		return
+	}
+
+	metrics.UpdateInventory(crList.Items)
+}
+
 // CleanupStaleReferences removes pod references for pods that no longer exist
 // This should be called periodically
 func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
@@ -705,6 +718,8 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 			}
 		}
 	}
+
+	r.RecomputeInventoryMetrics(ctx)
 
 	return nil
 }
@@ -825,6 +840,8 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 		"skipped", skipped,
 		"errors", errors,
 		"total", len(crList.Items))
+
+	r.RecomputeInventoryMetrics(ctx)
 
 	return nil
 }
