@@ -307,8 +307,16 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		now := metav1.Now()
 		cr.Status.LastPyxisCheckAt = &now
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusError
+		// A failed lookup leaves the CR describing nothing that Pyxis returned in
+		// this cycle. Keeping the previous payload next to an Error status makes
+		// consumers report an EOL date and vulnerability counts the API no longer
+		// confirms, so clear it for consistency with the NotCertified path.
+		clearPyxisStatus(&cr)
 		if updateErr := r.Status().Update(ctx, &cr); updateErr != nil {
 			logger.Error(updateErr, "failed to update status after Pyxis error")
+		}
+		if clearErr := r.clearCVEAnnotation(ctx, crName); clearErr != nil {
+			logger.Error(clearErr, "failed to clear CVE annotations after Pyxis error")
 		}
 		return
 	}
@@ -324,8 +332,10 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 	cr.Status.LastPyxisCheckAt = &now
 
 	if certData == nil {
-		// No certification data found
+		// No certification data found. Reset the payload as well, otherwise the
+		// values from the previous refresh survive next to a NotCertified status.
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+		clearPyxisStatus(&cr)
 	} else {
 		// Update with certification data using shared method
 		r.updateCRWithPyxisData(&cr, certData)
@@ -359,11 +369,14 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		logger.Error(err, "failed to update ImageCertificationInfo with Pyxis data")
 	}
 
-	// Update CVE annotations separately (after status update)
-	if certData != nil && len(certData.CVEs) > 0 {
-		if updateErr := r.updateCVEAnnotations(ctx, crName, certData.CVEs); updateErr != nil {
-			logger.Error(updateErr, "failed to update CVE annotations")
+	// Update CVE annotations separately (after status update). An empty CVE list
+	// means the annotation from an earlier refresh no longer applies.
+	if certData == nil || len(certData.CVEs) == 0 {
+		if clearErr := r.clearCVEAnnotation(ctx, crName); clearErr != nil {
+			logger.Error(clearErr, "failed to clear CVE annotations")
 		}
+	} else if updateErr := r.updateCVEAnnotations(ctx, crName, certData.CVEs); updateErr != nil {
+		logger.Error(updateErr, "failed to update CVE annotations")
 	}
 }
 
@@ -863,6 +876,9 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 
 	// Track CVEs for annotation updates (only relevant for Pyxis)
 	var cves []string
+	// clearCVEs marks that the refresh found no CVE data, so an annotation from
+	// an earlier cycle has to be removed.
+	var clearCVEs bool
 
 	// Refresh based on registry type
 	if image.IsRedHatRegistry(cr.Spec.Registry) && r.PyxisClient != nil {
@@ -877,10 +893,16 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 		latestCR.Status.LastPyxisCheckAt = &now
 
 		if certData == nil {
+			// No certification data any more: clear the payload so the CR does not
+			// keep advertising an EOL date and vulnerability counts that Pyxis has
+			// stopped returning.
 			latestCR.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+			clearPyxisStatus(&latestCR)
+			clearCVEs = true
 		} else {
 			r.updateCRWithPyxisData(&latestCR, certData)
 			cves = certData.CVEs
+			clearCVEs = len(cves) == 0
 		}
 	} else if cr.Spec.Registry == RegistryDockerHub && r.DockerHubClient != nil {
 		// Query Docker Hub for docker.io images
@@ -919,8 +941,12 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 		return err
 	}
 
-	// Update CVE annotations if available
-	if len(cves) > 0 {
+	// Update or clear CVE annotations
+	if clearCVEs {
+		if err := r.clearCVEAnnotation(ctx, latestCR.Name); err != nil {
+			logger.Error(err, "failed to clear CVE annotations during refresh")
+		}
+	} else if len(cves) > 0 {
 		if err := r.updateCVEAnnotations(ctx, latestCR.Name, cves); err != nil {
 			logger.Error(err, "failed to update CVE annotations during refresh")
 		}
@@ -938,6 +964,13 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 // updateCRWithPyxisData updates a CR's status with data from Pyxis
 func (r *PodReconciler) updateCRWithPyxisData(cr *securityv1alpha1.ImageCertificationInfo, certData *pyxis.CertificationData) {
 	cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusCertified
+
+	// Drop the derived scalars before recomputing them: they are only assigned
+	// when the source timestamp exists, so a value Pyxis stops publishing would
+	// otherwise survive forever.
+	cr.Status.ImageAge = ""
+	cr.Status.DaysUntilEOL = nil
+
 	cr.Status.PyxisData = &securityv1alpha1.PyxisData{
 		ProjectID:   certData.ProjectID,
 		Publisher:   certData.Publisher,
@@ -1000,6 +1033,38 @@ func (r *PodReconciler) updateCRWithPyxisData(cr *securityv1alpha1.ImageCertific
 		daysUntil := int(time.Until(cr.Status.PyxisData.EOLDate.Time).Hours() / 24)
 		cr.Status.DaysUntilEOL = &daysUntil
 	}
+}
+
+// clearPyxisStatus removes every Pyxis-derived field from a CR's status. A
+// refresh that no longer returns certification data must not leave values from
+// an earlier response behind, or consumers keep reporting a stale EOL date,
+// health grade and vulnerability count.
+func clearPyxisStatus(cr *securityv1alpha1.ImageCertificationInfo) {
+	cr.Status.PyxisData = nil
+	cr.Status.ImageAge = ""
+	cr.Status.DaysUntilEOL = nil
+}
+
+// clearCVEAnnotation removes the CVE annotation when a refresh no longer has
+// CVE data for the image. It lives in object metadata, so it needs its own
+// write: a status subresource update does not touch annotations.
+func (r *PodReconciler) clearCVEAnnotation(ctx context.Context, crName string) error {
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		return err
+	}
+	if _, ok := cr.Annotations[AnnotationCVEs]; !ok {
+		return nil
+	}
+
+	// A merge patch deletes the key without carrying a resourceVersion, so it
+	// cannot lose the race against the status write that precedes it. A cached
+	// read keeps returning the pre-write version, which makes an Update conflict
+	// on every attempt until the cache catches up.
+	patch := client.RawPatch(types.MergePatchType,
+		[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, AnnotationCVEs)))
+
+	return r.Patch(ctx, &cr, patch)
 }
 
 // MaxCVEAnnotationBytes bounds the joined CVE annotation. Kubernetes caps an

@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
 
@@ -876,4 +877,154 @@ func TestDigestLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPodReconciler_UpdateCRWithPyxisData_ClearsDroppedFields(t *testing.T) {
+	reconciler := &PodReconciler{}
+	cr := &securityv1alpha1.ImageCertificationInfo{}
+	cr.Name = testCRName
+
+	// First refresh: Pyxis publishes a build date and an EOL date.
+	reconciler.updateCRWithPyxisData(cr, &pyxis.CertificationData{
+		HealthIndex: "A",
+		PublishedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
+		EOLDate:     time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	if cr.Status.PyxisData == nil || cr.Status.PyxisData.EOLDate == nil {
+		t.Fatal("expected EOLDate to be set by the first refresh")
+	}
+	if cr.Status.ImageAge == "" {
+		t.Fatal("expected ImageAge to be set by the first refresh")
+	}
+	if cr.Status.DaysUntilEOL == nil {
+		t.Fatal("expected DaysUntilEOL to be set by the first refresh")
+	}
+
+	// Second refresh: Pyxis no longer returns either timestamp.
+	reconciler.updateCRWithPyxisData(cr, &pyxis.CertificationData{HealthIndex: "A"})
+
+	if cr.Status.PyxisData.EOLDate != nil {
+		t.Errorf("EOLDate = %v, want nil", cr.Status.PyxisData.EOLDate)
+	}
+	if cr.Status.DaysUntilEOL != nil {
+		t.Errorf("DaysUntilEOL = %d, want nil", *cr.Status.DaysUntilEOL)
+	}
+	if cr.Status.ImageAge != "" {
+		t.Errorf("ImageAge = %q, want empty", cr.Status.ImageAge)
+	}
+}
+
+// staleCertifiedCR returns a CR that still carries the payload of an earlier,
+// successful refresh.
+func staleCertifiedCR() *securityv1alpha1.ImageCertificationInfo {
+	now := metav1.Now()
+	eol := metav1.NewTime(time.Now().Add(30 * 24 * time.Hour))
+	days := 30
+	meta := metav1.ObjectMeta{
+		Name:        testCRName,
+		Annotations: map[string]string{AnnotationCVEs: "CVE-2026-0001,CVE-2026-0002"},
+	}
+	return &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: meta,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+			FirstSeenAt:         &now,
+			LastSeenAt:          &now,
+			ImageAge:            "45 days",
+			DaysUntilEOL:        &days,
+			PyxisData: &securityv1alpha1.PyxisData{
+				HealthIndex: "A",
+				EOLDate:     &eol,
+				Vulnerabilities: &securityv1alpha1.VulnerabilitySummary{
+					Critical: 99,
+				},
+			},
+		},
+	}
+}
+
+// assertStalePayloadCleared checks that no Pyxis-derived value survived.
+func assertStalePayloadCleared(t *testing.T, cr *securityv1alpha1.ImageCertificationInfo) {
+	t.Helper()
+	if cr.Status.CertificationStatus != securityv1alpha1.CertificationStatusNotCertified {
+		t.Errorf("CertificationStatus = %v, want NotCertified", cr.Status.CertificationStatus)
+	}
+	if cr.Status.PyxisData != nil {
+		t.Errorf("PyxisData = %+v, want nil", cr.Status.PyxisData)
+	}
+	if cr.Status.ImageAge != "" {
+		t.Errorf("ImageAge = %q, want empty", cr.Status.ImageAge)
+	}
+	if cr.Status.DaysUntilEOL != nil {
+		t.Errorf("DaysUntilEOL = %d, want nil", *cr.Status.DaysUntilEOL)
+	}
+	if _, ok := cr.Annotations[AnnotationCVEs]; ok {
+		t.Errorf("annotation %s still present, want removed", AnnotationCVEs)
+	}
+}
+
+func TestPodReconciler_CheckPyxisCertification_NotCertifiedClearsPayload(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleCertifiedCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: &MockPyxisClient{CertData: nil, Healthy: true},
+	}
+
+	ref := &image.Reference{
+		Registry:   testRegistry,
+		Repository: testRepository,
+		Digest:     testDigest,
+	}
+	reconciler.checkPyxisCertification(ctx, testCRName, ref)
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+	assertStalePayloadCleared(t, &updatedCR)
+}
+
+func TestPodReconciler_RefreshSingleImage_NotCertifiedClearsPayload(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleCertifiedCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: &MockPyxisClient{CertData: nil, Healthy: true},
+	}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+	assertStalePayloadCleared(t, &updatedCR)
 }
