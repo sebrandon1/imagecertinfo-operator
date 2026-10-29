@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/sebrandon1/go-toolbox/httpx"
@@ -35,7 +37,20 @@ const (
 	DefaultBaseURL = "https://catalog.redhat.com/api/containers/v1"
 	// DefaultTimeout is the default HTTP client timeout
 	DefaultTimeout = 30 * time.Second
+
+	// maxRetryAttempts is the total number of attempts, including the first.
+	maxRetryAttempts = 3
+	// maxRetryDelay caps the exponential part of the backoff.
+	maxRetryDelay = 5 * time.Second
+	// maxRetryAfterDelay caps a server-requested Retry-After delay.
+	maxRetryAfterDelay = 10 * time.Second
+	// retryJitterFraction is the relative jitter applied to the backoff.
+	retryJitterFraction = 0.3
 )
+
+// retryBaseDelay is the first backoff step. It is a variable so tests can
+// shorten it.
+var retryBaseDelay = 100 * time.Millisecond
 
 // Client interface for Pyxis API operations
 type Client interface {
@@ -179,18 +194,51 @@ func (c *HTTPClient) queryAndParse(ctx context.Context, requestURL string) (*Cer
 	return certData, nil
 }
 
-// fetchAndParseResponse fetches and parses the Pyxis API response
+// fetchAndParseResponse fetches and parses the Pyxis API response, retrying
+// transport errors and 429/5xx responses with jittered exponential backoff.
+// The caller's context deadline wins: retries stop as soon as it expires.
 func (c *HTTPClient) fetchAndParseResponse(
 	ctx context.Context, requestURL string,
 ) (*PyxisImageResponse, error) {
+	var result fetchResult
+
+	for attempt := range maxRetryAttempts {
+		result = c.fetchOnce(ctx, requestURL)
+		if result.err == nil || !result.retryable {
+			return result.response, result.err
+		}
+		if attempt == maxRetryAttempts-1 {
+			break
+		}
+		if err := sleepWithContext(ctx, retryDelay(attempt, result.retryAfter)); err != nil {
+			return nil, err
+		}
+	}
+
+	return result.response, result.err
+}
+
+// fetchResult is the outcome of a single Pyxis request attempt.
+type fetchResult struct {
+	response   *PyxisImageResponse
+	err        error
+	retryAfter time.Duration
+	retryable  bool
+}
+
+// fetchOnce performs one request attempt.
+func (c *HTTPClient) fetchOnce(ctx context.Context, requestURL string) fetchResult {
 	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return fetchResult{err: fmt.Errorf("failed to create request: %w", err)}
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fetchResult{err: fmt.Errorf("failed to execute request: %w", ctxErr)}
+		}
+		return fetchResult{err: fmt.Errorf("failed to execute request: %w", err), retryable: true}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -199,29 +247,97 @@ func (c *HTTPClient) fetchAndParseResponse(
 	case http.StatusOK:
 		// Continue processing
 	case http.StatusNotFound:
-		return nil, nil
+		return fetchResult{}
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf("authentication failed: %s", resp.Status)
+		return fetchResult{err: fmt.Errorf("authentication failed: %s", resp.Status)}
 	default:
 		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
-		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, body)
+		return fetchResult{
+			err:        fmt.Errorf("unexpected response status %s: %s", resp.Status, body),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			retryable:  isRetryableStatus(resp.StatusCode),
+		}
 	}
 
 	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return fetchResult{err: fmt.Errorf("failed to read response body: %w", err)}
 	}
 
 	var pagedResp PyxisPagedResponse
 	if err := json.Unmarshal(body, &pagedResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return fetchResult{err: fmt.Errorf("failed to parse response: %w", err)}
 	}
 
 	if len(pagedResp.Data) == 0 {
-		return nil, nil
+		return fetchResult{}
 	}
 
-	return &pagedResp.Data[0], nil
+	return fetchResult{response: &pagedResp.Data[0]}
+}
+
+// isRetryableStatus reports whether a status code warrants another attempt.
+func isRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+}
+
+// retryDelay computes the backoff before the next attempt. An attempt number
+// of 0 is the delay after the first failure.
+func retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	delay := retryBaseDelay
+	for range attempt {
+		delay *= 2
+		if delay >= maxRetryDelay {
+			delay = maxRetryDelay
+			break
+		}
+	}
+
+	// Apply ±retryJitterFraction of symmetric jitter so retries from many
+	// images do not align.
+	jitter := 1 + retryJitterFraction*(2*rand.Float64()-1)
+	delay = time.Duration(float64(delay) * jitter)
+
+	delay = min(max(delay, retryAfter), maxRetryAfterDelay)
+
+	return delay
+}
+
+// parseRetryAfter interprets a Retry-After header value, which may be a
+// number of seconds or an HTTP date. Unparseable values yield zero.
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
+}
+
+// sleepWithContext waits for d or until ctx is cancelled, whichever comes first.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // isFromRedHatRegistry checks if the image is from a Red Hat registry

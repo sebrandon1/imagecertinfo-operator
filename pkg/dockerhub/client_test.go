@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -308,5 +309,187 @@ func TestCalculateDaysSince(t *testing.T) {
 				t.Errorf("CalculateDaysSince() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// shortRetryBase shortens the backoff for the duration of a test.
+func shortRetryBase(t *testing.T) {
+	t.Helper()
+
+	previous := retryBaseDelay
+	retryBaseDelay = time.Millisecond
+	t.Cleanup(func() { retryBaseDelay = previous })
+}
+
+func TestHTTPClient_GetRepositoryInfo_RetriesRateLimit(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespace":"library","name":"nginx","pull_count":42}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	info, err := client.GetRepositoryInfo(context.Background(), testNSLibrary, testRepoNginx)
+	if err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v, want nil", err)
+	}
+	if info == nil || info.PullCount != 42 {
+		t.Fatalf("GetRepositoryInfo() = %+v, want pull count 42", info)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_GivesUpAfterThreeAttempts(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), testNSLibrary, testRepoNginx); err == nil {
+		t.Fatal("GetRepositoryInfo() error = nil, want error")
+	}
+	if got := attempts.Load(); got != maxRetryAttempts {
+		t.Errorf("attempts = %d, want %d", got, maxRetryAttempts)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_DoesNotRetryClientErrors(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), testNSLibrary, testRepoNginx); err == nil {
+		t.Fatal("GetRepositoryInfo() error = nil, want error")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_StopsWhenContextExpires(t *testing.T) {
+	previous := retryBaseDelay
+	retryBaseDelay = time.Hour
+	t.Cleanup(func() { retryBaseDelay = previous })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := client.GetRepositoryInfo(ctx, testNSLibrary, testRepoNginx); err == nil {
+		t.Fatal("GetRepositoryInfo() error = nil, want context error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("GetRepositoryInfo() took %v, want it to stop at the context deadline", elapsed)
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	previous := retryBaseDelay
+	retryBaseDelay = 100 * time.Millisecond
+	t.Cleanup(func() { retryBaseDelay = previous })
+
+	tests := []struct {
+		name       string
+		attempt    int
+		retryAfter time.Duration
+		min        time.Duration
+		max        time.Duration
+	}{
+		{name: "first retry", attempt: 0, min: 70 * time.Millisecond, max: 130 * time.Millisecond},
+		{name: "second retry doubles", attempt: 1, min: 140 * time.Millisecond, max: 260 * time.Millisecond},
+		{name: "caps at max", attempt: 10, min: maxRetryDelay * 7 / 10, max: maxRetryAfterDelay},
+		{name: "retry-after wins", attempt: 0, retryAfter: 2 * time.Second, min: 2 * time.Second, max: 2 * time.Second},
+		{
+			name: "retry-after is capped", attempt: 0, retryAfter: time.Minute,
+			min: maxRetryAfterDelay, max: maxRetryAfterDelay,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := retryDelay(tt.attempt, tt.retryAfter)
+			if got < tt.min || got > tt.max {
+				t.Errorf("retryDelay(%d, %v) = %v, want between %v and %v",
+					tt.attempt, tt.retryAfter, got, tt.min, tt.max)
+			}
+		})
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "empty", value: "", want: 0},
+		{name: "seconds", value: "3", want: 3 * time.Second},
+		{name: "zero", value: "0", want: 0},
+		{name: "negative", value: "-5", want: 0},
+		{name: "garbage", value: "soon", want: 0},
+		{name: "past date", value: "Wed, 21 Oct 2015 07:28:00 GMT", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseRetryAfter(tt.value); got != tt.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_RetriesTransportErrors(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		// Drop the connection without a response so the client sees a
+		// transport error rather than an HTTP status.
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), testNSLibrary, testRepoNginx); err == nil {
+		t.Fatal("GetRepositoryInfo() error = nil, want error")
+	}
+	if got := attempts.Load(); got != maxRetryAttempts {
+		t.Errorf("attempts = %d, want %d", got, maxRetryAttempts)
 	}
 }
