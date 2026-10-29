@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sebrandon1/go-toolbox/httpx"
@@ -34,7 +36,23 @@ const (
 	DefaultBaseURL = "https://hub.docker.com/v2"
 	// DefaultTimeout is the default HTTP client timeout
 	DefaultTimeout = 30 * time.Second
+
+	// maxRetryAttempts is the total number of attempts, including the first.
+	maxRetryAttempts = 3
+	// maxRetryDelay caps the exponential part of the backoff.
+	maxRetryDelay = 5 * time.Second
+	// maxRetryAfterDelay caps a server-requested Retry-After delay.
+	maxRetryAfterDelay = 10 * time.Second
+	// retryJitterFraction is the relative jitter applied to the backoff.
+	retryJitterFraction = 0.3
+
+	// metricResultError labels a failed Docker Hub request.
+	metricResultError = "error"
 )
+
+// retryBaseDelay is the first backoff step. It is a variable so tests can
+// shorten it.
+var retryBaseDelay = 100 * time.Millisecond
 
 // Client interface for Docker Hub API operations
 type Client interface {
@@ -97,6 +115,8 @@ func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 
 // GetRepositoryInfo retrieves repository metadata from Docker Hub.
 // For official images, the namespace should be "library".
+// Transport errors and 429/5xx responses are retried with jittered exponential
+// backoff; the caller's context deadline wins over the retry budget.
 func (c *HTTPClient) GetRepositoryInfo(
 	ctx context.Context, namespace, repository string,
 ) (*RepositoryInfo, error) {
@@ -105,43 +125,16 @@ func (c *HTTPClient) GetRepositoryInfo(
 	// Build the request URL
 	requestURL := fmt.Sprintf("%s/repositories/%s/%s", c.baseURL, namespace, repository)
 
-	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	repoResp, status, err := c.fetchRepository(ctx, requestURL)
 	duration := time.Since(start).Seconds()
-	if err != nil {
-		metrics.RecordDockerHubRequest("error", "repository", duration)
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
 
-	// Handle response status codes
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// Continue processing
-	case http.StatusNotFound:
+	switch {
+	case err != nil:
+		metrics.RecordDockerHubRequest(status, "repository", duration)
+		return nil, err
+	case status == "not_found":
 		metrics.RecordDockerHubRequest("not_found", "repository", duration)
 		return nil, nil
-	case http.StatusTooManyRequests:
-		metrics.RecordDockerHubRequest("rate_limited", "repository", duration)
-		return nil, fmt.Errorf("rate limited by Docker Hub")
-	default:
-		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
-		metrics.RecordDockerHubRequest("error", "repository", duration)
-		return nil, fmt.Errorf("unexpected response status %s: %s", resp.Status, body)
-	}
-
-	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var repoResp DockerHubRepositoryResponse
-	if err := json.Unmarshal(body, &repoResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	metrics.RecordDockerHubRequest("success", "repository", duration)
@@ -165,6 +158,158 @@ func (c *HTTPClient) GetRepositoryInfo(
 	}
 
 	return info, nil
+}
+
+// repositoryResult is the outcome of a single Docker Hub request attempt.
+type repositoryResult struct {
+	response   *DockerHubRepositoryResponse
+	status     string
+	err        error
+	retryAfter time.Duration
+	retryable  bool
+}
+
+// fetchRepository requests repository metadata, retrying transport errors and
+// 429/5xx responses with jittered exponential backoff. It returns the parsed
+// response, or the metric label describing the final outcome.
+func (c *HTTPClient) fetchRepository(
+	ctx context.Context, requestURL string,
+) (*DockerHubRepositoryResponse, string, error) {
+	var result repositoryResult
+
+	for attempt := range maxRetryAttempts {
+		result = c.fetchRepositoryOnce(ctx, requestURL)
+		if result.err == nil || !result.retryable {
+			break
+		}
+		if attempt == maxRetryAttempts-1 {
+			break
+		}
+		if err := sleepWithContext(ctx, retryDelay(attempt, result.retryAfter)); err != nil {
+			return nil, metricResultError, err
+		}
+	}
+
+	return result.response, result.status, result.err
+}
+
+// fetchRepositoryOnce performs one repository request attempt.
+func (c *HTTPClient) fetchRepositoryOnce(ctx context.Context, requestURL string) repositoryResult {
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return repositoryResult{status: metricResultError, err: fmt.Errorf("failed to create request: %w", err)}
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return repositoryResult{status: metricResultError, err: fmt.Errorf("failed to execute request: %w", ctxErr)}
+		}
+		return repositoryResult{
+			status:    metricResultError,
+			err:       fmt.Errorf("failed to execute request: %w", err),
+			retryable: true,
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Handle response status codes
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Continue processing
+	case http.StatusNotFound:
+		return repositoryResult{status: "not_found"}
+	case http.StatusTooManyRequests:
+		return repositoryResult{
+			status:     "rate_limited",
+			err:        fmt.Errorf("rate limited by Docker Hub"),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			retryable:  true,
+		}
+	default:
+		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
+		return repositoryResult{
+			status:     metricResultError,
+			err:        fmt.Errorf("unexpected response status %s: %s", resp.Status, body),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			retryable:  isRetryableStatus(resp.StatusCode),
+		}
+	}
+
+	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
+	if err != nil {
+		return repositoryResult{status: metricResultError, err: fmt.Errorf("failed to read response body: %w", err)}
+	}
+
+	var repoResp DockerHubRepositoryResponse
+	if err := json.Unmarshal(body, &repoResp); err != nil {
+		return repositoryResult{status: metricResultError, err: fmt.Errorf("failed to parse response: %w", err)}
+	}
+
+	return repositoryResult{response: &repoResp, status: "success"}
+}
+
+// isRetryableStatus reports whether a status code warrants another attempt.
+func isRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+}
+
+// retryDelay computes the backoff before the next attempt. An attempt number
+// of 0 is the delay after the first failure.
+func retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	delay := retryBaseDelay
+	for range attempt {
+		delay *= 2
+		if delay >= maxRetryDelay {
+			delay = maxRetryDelay
+			break
+		}
+	}
+
+	// Apply symmetric jitter so retries from many namespaces do not align.
+	jitter := 1 + retryJitterFraction*(2*rand.Float64()-1)
+	delay = time.Duration(float64(delay) * jitter)
+
+	delay = min(max(delay, retryAfter), maxRetryAfterDelay)
+
+	return delay
+}
+
+// parseRetryAfter interprets a Retry-After header value, which may be a
+// number of seconds or an HTTP date. Unparseable values yield zero.
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
+}
+
+// sleepWithContext waits for d or until ctx is cancelled, whichever comes first.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // checkVerifiedPublisher checks if a namespace belongs to a Docker Verified Publisher.
