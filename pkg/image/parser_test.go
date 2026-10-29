@@ -17,6 +17,8 @@ limitations under the License.
 package image
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -228,6 +230,73 @@ func TestReferenceToCRName(t *testing.T) {
 				t.Errorf("ReferenceToCRName() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReferenceToCRName_LongNames(t *testing.T) {
+	validName := regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
+	// 233 characters: the generated name puts '.' exactly at byte 253, which is
+	// where the old implementation truncated and left an invalid trailing dot.
+	dotAtLimitRepo := strings.Repeat("a", 233)
+	// Two references sharing the first 253 bytes but with different digests.
+	sharedPrefixRepo := strings.Repeat("b", 240)
+
+	tests := []struct {
+		name string
+		ref  *Reference
+	}{
+		{
+			name: "400 character repository",
+			ref: &Reference{
+				Registry:   testRegistryRedHat,
+				Repository: strings.Repeat("a", 400),
+				Digest:     testFullDigest,
+			},
+		},
+		{
+			name: "truncation would end on a dot",
+			ref: &Reference{
+				Registry:   testRegistryRedHat,
+				Repository: dotAtLimitRepo,
+				Digest:     testFullDigest,
+			},
+		},
+		{
+			name: "long shared prefix, first digest",
+			ref: &Reference{
+				Registry:   testRegistryRedHat,
+				Repository: sharedPrefixRepo,
+				Digest:     "sha256:" + strings.Repeat("a", 64),
+			},
+		},
+		{
+			name: "long shared prefix, second digest",
+			ref: &Reference{
+				Registry:   testRegistryRedHat,
+				Repository: sharedPrefixRepo,
+				Digest:     "sha256:" + strings.Repeat("b", 64),
+			},
+		},
+	}
+
+	got := make([]string, len(tests))
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := ReferenceToCRName(tt.ref)
+			got[i] = name
+
+			if len(name) > 253 {
+				t.Errorf("name length = %d, want <= 253", len(name))
+			}
+			if !validName.MatchString(name) {
+				t.Errorf("name %q is not a valid DNS-1123 subdomain", name)
+			}
+		})
+	}
+
+	if got[2] == got[3] {
+		t.Errorf("references sharing a 253-byte prefix produced the same name %q", got[2])
 	}
 }
 
