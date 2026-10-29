@@ -17,8 +17,12 @@ limitations under the License.
 package metrics
 
 import (
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 )
 
 const (
@@ -299,6 +303,82 @@ func init() {
 		QuayRequestDuration,
 		QuayCacheHits,
 	)
+}
+
+// EOLWindows are the horizons reported by the images_eol_within_days gauge.
+var EOLWindows = []int{30, 60, 90}
+
+// inventoryStatuses, inventoryGrades and vulnSeverities are the label values
+// the inventory gauges always expose, so a query returns a zero series instead
+// of nothing while the matching images do not exist yet.
+var (
+	inventoryStatuses = []string{"Certified", "NotCertified", "Pending", "Unknown", "Error"}
+	inventoryGrades   = []string{"A", "B", "C", "D", "E", "F"}
+	vulnSeverities    = []string{"critical", "important", "moderate", "low"}
+)
+
+// UpdateInventory recomputes the image inventory gauges from the current set of
+// ImageCertificationInfo resources. The gauge vectors are reset first so label
+// values for deleted images do not linger.
+func UpdateInventory(items []securityv1alpha1.ImageCertificationInfo) {
+	ImagesTotal.Reset()
+	ImagesByHealth.Reset()
+	VulnerabilitiesTotal.Reset()
+	ImagesEOLWithinDays.Reset()
+
+	pastEOL := 0
+
+	for i := range items {
+		cr := &items[i]
+
+		status := string(cr.Status.CertificationStatus)
+		if status == "" {
+			status = "Unknown"
+		}
+		ImagesTotal.WithLabelValues(status).Inc()
+
+		if cr.Status.PyxisData != nil {
+			if grade := cr.Status.PyxisData.HealthIndex; grade != "" {
+				ImagesByHealth.WithLabelValues(grade).Inc()
+			}
+			if v := cr.Status.PyxisData.Vulnerabilities; v != nil {
+				VulnerabilitiesTotal.WithLabelValues("critical").Add(float64(v.Critical))
+				VulnerabilitiesTotal.WithLabelValues("important").Add(float64(v.Important))
+				VulnerabilitiesTotal.WithLabelValues("moderate").Add(float64(v.Moderate))
+				VulnerabilitiesTotal.WithLabelValues("low").Add(float64(v.Low))
+			}
+		}
+
+		if cr.Status.DaysUntilEOL == nil {
+			continue
+		}
+		days := *cr.Status.DaysUntilEOL
+		if days < 0 {
+			pastEOL++
+			continue
+		}
+		for _, window := range EOLWindows {
+			if days <= window {
+				ImagesEOLWithinDays.WithLabelValues(strconv.Itoa(window)).Inc()
+			}
+		}
+	}
+
+	ImagesPastEOL.Set(float64(pastEOL))
+
+	// Publish every documented label value, including the ones at zero.
+	for _, status := range inventoryStatuses {
+		ImagesTotal.WithLabelValues(status).Add(0)
+	}
+	for _, grade := range inventoryGrades {
+		ImagesByHealth.WithLabelValues(grade).Add(0)
+	}
+	for _, severity := range vulnSeverities {
+		VulnerabilitiesTotal.WithLabelValues(severity).Add(0)
+	}
+	for _, window := range EOLWindows {
+		ImagesEOLWithinDays.WithLabelValues(strconv.Itoa(window)).Add(0)
+	}
 }
 
 // RecordPyxisRequest records a Pyxis API request metric

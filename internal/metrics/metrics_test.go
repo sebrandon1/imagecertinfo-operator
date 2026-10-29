@@ -19,7 +19,11 @@ package metrics
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 )
 
 func TestMetricsRegistered(t *testing.T) {
@@ -86,5 +90,69 @@ func TestMetricsRegistered(t *testing.T) {
 		if _, ok := gotNames[name]; !ok {
 			t.Errorf("metric %q was not registered", name)
 		}
+	}
+}
+
+func TestUpdateInventory(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	items := []securityv1alpha1.ImageCertificationInfo{
+		{
+			Status: securityv1alpha1.ImageCertificationInfoStatus{
+				CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+				DaysUntilEOL:        intPtr(20),
+				PyxisData: &securityv1alpha1.PyxisData{
+					HealthIndex: "A",
+					Vulnerabilities: &securityv1alpha1.VulnerabilitySummary{
+						Critical:  2,
+						Important: 1,
+					},
+				},
+			},
+		},
+		{
+			Status: securityv1alpha1.ImageCertificationInfoStatus{
+				CertificationStatus: securityv1alpha1.CertificationStatusNotCertified,
+				DaysUntilEOL:        intPtr(-5),
+			},
+		},
+		{
+			Status: securityv1alpha1.ImageCertificationInfoStatus{
+				CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+				DaysUntilEOL:        intPtr(45),
+				PyxisData: &securityv1alpha1.PyxisData{
+					HealthIndex: "B",
+				},
+			},
+		},
+	}
+
+	UpdateInventory(items)
+
+	tests := []struct {
+		name   string
+		metric prometheus.Gauge
+		want   float64
+	}{
+		{"certified total", ImagesTotal.WithLabelValues("Certified"), 2},
+		{"not certified total", ImagesTotal.WithLabelValues("NotCertified"), 1},
+		{"pending total", ImagesTotal.WithLabelValues("Pending"), 0},
+		{"health A", ImagesByHealth.WithLabelValues("A"), 1},
+		{"health B", ImagesByHealth.WithLabelValues("B"), 1},
+		{"health F", ImagesByHealth.WithLabelValues("F"), 0},
+		{"critical vulnerabilities", VulnerabilitiesTotal.WithLabelValues("critical"), 2},
+		{"important vulnerabilities", VulnerabilitiesTotal.WithLabelValues("important"), 1},
+		{"eol within 30", ImagesEOLWithinDays.WithLabelValues("30"), 1},
+		{"eol within 60", ImagesEOLWithinDays.WithLabelValues("60"), 2},
+		{"eol within 90", ImagesEOLWithinDays.WithLabelValues("90"), 2},
+		{"past eol", ImagesPastEOL, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := testutil.ToFloat64(tt.metric); got != tt.want {
+				t.Errorf("value = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
