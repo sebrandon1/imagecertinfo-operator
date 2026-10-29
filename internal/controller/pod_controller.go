@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -130,6 +132,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	allStatuses = append(allStatuses, pod.Status.ContainerStatuses...)
 	allStatuses = append(allStatuses, pod.Status.InitContainerStatuses...)
 
+	var errs []error
+
 	for _, containerStatus := range allStatuses {
 		if containerStatus.ImageID == "" {
 			continue
@@ -160,19 +164,29 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			// Create new ImageCertificationInfo
 			if err := r.createImageCertificationInfo(ctx, ref, crName, podRef); err != nil {
 				logger.Error(err, "failed to create ImageCertificationInfo", "name", crName)
+				errs = append(errs, fmt.Errorf("create %s: %w", crName, err))
 				continue
 			}
 			logger.Info("created ImageCertificationInfo", "name", crName, "registry", ref.Registry)
 		} else if err != nil {
 			logger.Error(err, "failed to get ImageCertificationInfo", "name", crName)
+			errs = append(errs, fmt.Errorf("get %s: %w", crName, err))
 			continue
 		} else {
 			// Update existing CR with new pod reference
 			if err := r.updatePodReferences(ctx, &existingCR, podRef); err != nil {
 				logger.Error(err, "failed to update ImageCertificationInfo", "name", crName)
+				errs = append(errs, fmt.Errorf("update %s: %w", crName, err))
 				continue
 			}
 		}
+	}
+
+	// Returning the error makes controller-runtime requeue with backoff, so a
+	// failed write is retried instead of being lost until the pod changes again.
+	if len(errs) > 0 {
+		metrics.RecordReconcile("error", time.Since(start).Seconds(), "pod")
+		return ctrl.Result{}, errors.Join(errs...)
 	}
 
 	metrics.RecordReconcile("success", time.Since(start).Seconds(), "pod")
@@ -201,7 +215,16 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 
 	// Create the resource
 	if err := r.Create(ctx, cr); err != nil {
-		return err
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		// Another pod carrying the same image won the race. Treat it as the
+		// update path so its reference is not dropped.
+		var existing securityv1alpha1.ImageCertificationInfo
+		if getErr := r.Get(ctx, client.ObjectKey{Name: crName}, &existing); getErr != nil {
+			return getErr
+		}
+		return r.updatePodReferences(ctx, &existing, podRef)
 	}
 
 	// Update status
@@ -224,7 +247,10 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 		},
 	}
 
-	if err := r.Status().Update(ctx, cr); err != nil {
+	initialStatus := cr.Status
+	if err := r.updateCRStatus(ctx, cr.Name, func(latest *securityv1alpha1.ImageCertificationInfo) {
+		latest.Status = initialStatus
+	}); err != nil {
 		return err
 	}
 
@@ -254,36 +280,64 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 	return nil
 }
 
-// updatePodReferences updates the pod references in an existing ImageCertificationInfo
+// updatePodReferences updates the pod references in an existing ImageCertificationInfo.
+// It retries on conflict with a freshly fetched copy so a concurrent write for
+// another pod sharing the image cannot drop this reference.
 func (r *PodReconciler) updatePodReferences(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, podRef securityv1alpha1.PodReference) error {
 	now := metav1.Now()
 
 	if cr.Labels[LabelOperatorVersion] != version.Version {
-		if cr.Labels == nil {
-			cr.Labels = make(map[string]string)
-		}
-		cr.Labels[LabelOperatorVersion] = version.Version
-		if err := r.Update(ctx, cr); err != nil {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var latest securityv1alpha1.ImageCertificationInfo
+			if err := r.Get(ctx, client.ObjectKey{Name: cr.Name}, &latest); err != nil {
+				return err
+			}
+			if latest.Labels == nil {
+				latest.Labels = make(map[string]string)
+			}
+			latest.Labels[LabelOperatorVersion] = version.Version
+			return r.Update(ctx, &latest)
+		}); err != nil {
 			return err
 		}
 	}
 
-	// Check if this pod reference already exists
-	for _, existing := range cr.Status.PodReferences {
-		if existing.Namespace == podRef.Namespace &&
-			existing.Name == podRef.Name &&
-			existing.Container == podRef.Container {
-			// Already tracked, just update LastSeenAt
-			cr.Status.LastSeenAt = &now
-			return r.Status().Update(ctx, cr)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest securityv1alpha1.ImageCertificationInfo
+		if err := r.Get(ctx, client.ObjectKey{Name: cr.Name}, &latest); err != nil {
+			return err
 		}
-	}
 
-	// Add new pod reference
-	cr.Status.PodReferences = append(cr.Status.PodReferences, podRef)
-	cr.Status.LastSeenAt = &now
+		// Already tracked: just refresh LastSeenAt.
+		for _, existing := range latest.Status.PodReferences {
+			if existing.Namespace == podRef.Namespace &&
+				existing.Name == podRef.Name &&
+				existing.Container == podRef.Container {
+				latest.Status.LastSeenAt = &now
+				return r.Status().Update(ctx, &latest)
+			}
+		}
 
-	return r.Status().Update(ctx, cr)
+		latest.Status.PodReferences = append(latest.Status.PodReferences, podRef)
+		latest.Status.LastSeenAt = &now
+
+		return r.Status().Update(ctx, &latest)
+	})
+}
+
+// updateCRStatus applies mutate to the latest version of a CR and writes its
+// status subresource, retrying on conflict.
+func (r *PodReconciler) updateCRStatus(
+	ctx context.Context, crName string, mutate func(*securityv1alpha1.ImageCertificationInfo),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cr securityv1alpha1.ImageCertificationInfo
+		if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+			return err
+		}
+		mutate(&cr)
+		return r.Status().Update(ctx, &cr)
+	})
 }
 
 // checkPyxisCertification queries the Pyxis API for certification data
@@ -727,8 +781,9 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 		}
 
 		if len(validRefs) != len(cr.Status.PodReferences) {
-			cr.Status.PodReferences = validRefs
-			if err := r.Status().Update(ctx, cr); err != nil {
+			if err := r.updateCRStatus(ctx, cr.Name, func(latest *securityv1alpha1.ImageCertificationInfo) {
+				latest.Status.PodReferences = validRefs
+			}); err != nil {
 				logger.Error(err, "failed to update stale references", "name", cr.Name)
 			}
 		}
@@ -806,7 +861,7 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 
 	refreshed := 0
 	skipped := 0
-	errors := 0
+	errorCount := 0
 
 	for i := range crList.Items {
 		cr := &crList.Items[i]
@@ -833,7 +888,7 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 		// Refresh single image with delay between requests (staggering)
 		if err := r.refreshSingleImage(ctx, cr); err != nil {
 			logger.Error(err, "failed to refresh image", "name", cr.Name)
-			errors++
+			errorCount++
 		} else {
 			refreshed++
 		}
@@ -853,7 +908,7 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 		"duration", duration,
 		"refreshed", refreshed,
 		"skipped", skipped,
-		"errors", errors,
+		"errors", errorCount,
 		"total", len(crList.Items))
 
 	r.RecomputeInventoryMetrics(ctx)

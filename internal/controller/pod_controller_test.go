@@ -18,14 +18,18 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -33,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
+	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
@@ -1027,4 +1032,117 @@ func TestPodReconciler_RefreshSingleImage_NotCertifiedClearsPayload(t *testing.T
 		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
 	}
 	assertStalePayloadCleared(t, &updatedCR)
+}
+
+func TestPodReconciler_Reconcile_ReturnsErrorOnWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	meta := metav1.ObjectMeta{Name: testPodName, Namespace: testNamespace}
+	pod := &corev1.Pod{
+		ObjectMeta: meta,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: testContainer, ImageID: testRegistry + "/" + testRepository + "@" + testDigest},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		WithStatusSubresource(&securityv1alpha1.ImageCertificationInfo{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object,
+				opts ...client.CreateOption) error {
+				if _, ok := obj.(*securityv1alpha1.ImageCertificationInfo); ok {
+					return errors.New("simulated write failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+
+	key := types.NamespacedName{Name: testPodName, Namespace: testNamespace}
+	req := reconcile.Request{NamespacedName: key}
+	_, err := reconciler.Reconcile(ctx, req)
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want an error so the request is requeued")
+	}
+}
+
+func TestPodReconciler_UpdatePodReferences_RetriesOnConflict(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	now := metav1.Now()
+	meta := metav1.ObjectMeta{
+		Name:   testCRName,
+		Labels: map[string]string{LabelOperatorVersion: version.Version},
+	}
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: meta,
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			FirstSeenAt: &now,
+			LastSeenAt:  &now,
+			PodReferences: []securityv1alpha1.PodReference{
+				{Namespace: testNamespace, Name: testExistingPod, Container: testContainer},
+			},
+		},
+	}
+
+	conflicts := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string,
+				obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResource == "status" && conflicts == 0 {
+					conflicts++
+					return apierrors.NewConflict(
+						schema.GroupResource{
+							Group:    "security.telco.openshift.io",
+							Resource: "imagecertificationinfoes",
+						},
+						obj.GetName(),
+						errors.New("simulated conflict"),
+					)
+				}
+				return c.SubResource(subResource).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+	podRef := securityv1alpha1.PodReference{
+		Namespace: testNamespace,
+		Name:      testPodName,
+		Container: testContainer,
+	}
+
+	if err := reconciler.updatePodReferences(ctx, cr, podRef); err != nil {
+		t.Fatalf("updatePodReferences() error = %v", err)
+	}
+	if conflicts != 1 {
+		t.Errorf("conflicts = %d, want 1 injected conflict", conflicts)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+	found := false
+	for _, ref := range updatedCR.Status.PodReferences {
+		if ref.Name == testPodName {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("pod reference was not persisted after the conflict retry")
+	}
 }
