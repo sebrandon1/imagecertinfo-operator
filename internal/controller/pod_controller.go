@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1000,17 +1002,57 @@ func (r *PodReconciler) updateCRWithPyxisData(cr *securityv1alpha1.ImageCertific
 	}
 }
 
+// MaxCVEAnnotationBytes bounds the joined CVE annotation. Kubernetes caps an
+// object's whole metadata at 256 KiB, so 64 KiB leaves headroom for the other
+// annotations and labels on the CR.
+const MaxCVEAnnotationBytes = 64 * 1024
+
+// cveTruncationSentinel prefixes the last element of a truncated CVE list, so a
+// consumer can tell the list is incomplete and how many IDs were dropped.
+const cveTruncationSentinel = "...truncated:"
+
+// buildCVEAnnotation joins the CVE IDs into a single annotation value that
+// stays within MaxCVEAnnotationBytes. It reports whether it had to truncate.
+func buildCVEAnnotation(cves []string) (string, bool) {
+	var b strings.Builder
+
+	for i, cve := range cves {
+		remaining := len(cves) - i
+		// Reserve room for the sentinel element plus its separator.
+		reserve := len(cveTruncationSentinel) + len(strconv.Itoa(remaining)) + 2
+		if b.Len()+len(cve)+1+reserve > MaxCVEAnnotationBytes {
+			return strings.TrimSuffix(b.String(), ",") +
+				"," + cveTruncationSentinel + strconv.Itoa(remaining), true
+		}
+		b.WriteString(cve)
+		b.WriteString(",")
+	}
+
+	return strings.TrimSuffix(b.String(), ","), false
+}
+
 // updateCVEAnnotations updates the CVE annotation on a CR
 func (r *PodReconciler) updateCVEAnnotations(ctx context.Context, crName string, cves []string) error {
+	value, truncated := buildCVEAnnotation(cves)
+
 	var cr securityv1alpha1.ImageCertificationInfo
 	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
 		return err
 	}
-	if cr.Annotations == nil {
-		cr.Annotations = make(map[string]string)
+	// Nothing to write when the list has not changed since the last refresh.
+	if cr.Annotations[AnnotationCVEs] == value {
+		return nil
 	}
-	cr.Annotations[AnnotationCVEs] = strings.Join(cves, ",")
-	return r.Update(ctx, &cr)
+
+	log.FromContext(ctx).V(1).Info("updating CVE annotation",
+		"crName", crName, "cves", len(cves), "bytes", len(value), "truncated", truncated)
+
+	// A merge patch carries no resourceVersion, so it does not conflict with the
+	// status write that precedes it in the same reconcile.
+	patch := client.RawPatch(types.MergePatchType,
+		[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, AnnotationCVEs, value)))
+
+	return r.Patch(ctx, &cr, patch)
 }
 
 // imageStateSnapshot captures the state of an image for change detection
