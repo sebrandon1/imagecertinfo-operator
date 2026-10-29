@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,9 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
@@ -74,6 +77,11 @@ const (
 
 // gradeOrder maps health grades to numeric values for comparison
 var gradeOrder = map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
+
+// lastSeenRefreshWindow is the minimum interval between LastSeenAt rewrites for
+// an already-tracked pod reference. Kubelet updates pod status frequently, so
+// writing on every event is pure write amplification.
+var lastSeenRefreshWindow = 5 * time.Minute
 
 // digestLabel builds the value for LabelDigest from a full sha256 digest string.
 // The colon in "sha256:" is not valid in label values, so we use "sha256-" instead.
@@ -323,6 +331,9 @@ func (r *PodReconciler) updatePodReferences(ctx context.Context, cr *securityv1a
 			if existing.Namespace == podRef.Namespace &&
 				existing.Name == podRef.Name &&
 				existing.Container == podRef.Container {
+				if lastSeenRecently(latest.Status.LastSeenAt) {
+					return nil
+				}
 				latest.Status.LastSeenAt = &now
 				return r.Status().Update(ctx, &latest)
 			}
@@ -333,6 +344,15 @@ func (r *PodReconciler) updatePodReferences(ctx context.Context, cr *securityv1a
 
 		return r.Status().Update(ctx, &latest)
 	})
+}
+
+// lastSeenRecently reports whether a pod reference was refreshed within
+// lastSeenRefreshWindow.
+func lastSeenRecently(lastSeen *metav1.Time) bool {
+	if lastSeen == nil {
+		return false
+	}
+	return time.Since(lastSeen.Time) < lastSeenRefreshWindow
 }
 
 // updateCRStatus applies mutate to the latest version of a CR and writes its
@@ -740,7 +760,49 @@ func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
 		Named("pod").
+		WithEventFilter(podDiscoveryPredicate()).
 		Complete(r)
+}
+
+// podDiscoveryPredicate admits only the pod events that can change image
+// discovery: creation, deletion, and updates that alter the phase or the set of
+// container image IDs. Everything else is routine kubelet status churn.
+func podDiscoveryPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
+			newPod, newOK := e.ObjectNew.(*corev1.Pod)
+			if !oldOK || !newOK {
+				return true
+			}
+
+			return podImageSetChanged(oldPod, newPod)
+		},
+	}
+}
+
+// podImageSetChanged reports whether the pod phase or the set of container
+// image IDs differs between two versions of a pod.
+func podImageSetChanged(oldPod, newPod *corev1.Pod) bool {
+	if oldPod.Status.Phase != newPod.Status.Phase {
+		return true
+	}
+
+	return !slices.Equal(podImageIDs(oldPod), podImageIDs(newPod))
+}
+
+// podImageIDs returns the sorted image IDs reported by the pod's containers.
+func podImageIDs(pod *corev1.Pod) []string {
+	ids := make([]string, 0, len(pod.Status.ContainerStatuses))
+	for _, status := range pod.Status.ContainerStatuses {
+		ids = append(ids, status.ImageID)
+	}
+	slices.Sort(ids)
+
+	return ids
 }
 
 // RecomputeInventoryMetrics refreshes the image inventory gauges from the
