@@ -31,10 +31,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -345,9 +348,26 @@ func (m *MockPyxisClient) IsHealthy(ctx context.Context) bool {
 }
 
 func TestPodReconciler_SetupWithManager(t *testing.T) {
-	// This test requires a real cluster config, so we skip it in unit tests.
-	// Integration tests using envtest will cover this functionality.
-	t.Skip("Skipping test - requires kubeconfig or envtest setup")
+	if envtestConfig == nil {
+		t.Skip("envtest is not available; set KUBEBUILDER_ASSETS to run this test")
+	}
+
+	mgr, err := ctrl.NewManager(envtestConfig, ctrl.Options{
+		Scheme:                 newTestScheme(),
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	reconciler := &PodReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		t.Fatalf("SetupWithManager() error = %v", err)
+	}
 }
 
 func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
@@ -1322,5 +1342,84 @@ func TestPodDiscoveryPredicate(t *testing.T) {
 				t.Errorf("Update() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// envtestReconcileNamespace is the namespace used by the envtest reconcile test.
+const envtestReconcileNamespace = "envtest-reconcile"
+
+func TestPodReconciler_Reconcile_WithEnvtest(t *testing.T) {
+	if envtestClient == nil {
+		t.Skip("envtest is not available; set KUBEBUILDER_ASSETS to run this test")
+	}
+
+	ctx := context.Background()
+
+	ns := &corev1.Namespace{}
+	ns.Name = envtestReconcileNamespace
+	if err := envtestClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("failed to create namespace: %v", err)
+	}
+
+	imageID := testRegistry + "/ubi9/ubi-minimal@" + testDigest
+	pod := &corev1.Pod{}
+	pod.Name = "envtest-pod"
+	pod.Namespace = envtestReconcileNamespace
+	pod.Spec.Containers = []corev1.Container{{
+		Name:  testContainer,
+		Image: testRegistry + "/ubi9/ubi-minimal:9.5",
+	}}
+	if err := envtestClient.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	// Pod status must be written through the status subresource: the API
+	// server, not the client, owns it.
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:    testContainer,
+		Image:   testRegistry + "/ubi9/ubi-minimal:9.5",
+		ImageID: imageID,
+		Ready:   true,
+	}}
+	if err := envtestClient.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("failed to update pod status: %v", err)
+	}
+
+	reconciler := &PodReconciler{
+		Client:      envtestClient,
+		Scheme:      newTestScheme(),
+		PyxisClient: &MockPyxisClient{Healthy: true},
+		Recorder:    record.NewFakeRecorder(100),
+	}
+
+	req := reconcile.Request{
+		//nolint:modernize // the field type cannot be elided in a keyed struct literal
+		NamespacedName: types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name},
+	}
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// The CRD name comes from the parsed image reference.
+	ref, err := image.ParseImageID(imageID)
+	if err != nil {
+		t.Fatalf("ParseImageID() error = %v", err)
+	}
+	crName := image.ReferenceToCRName(ref)
+
+	cr := &securityv1alpha1.ImageCertificationInfo{}
+	if err := envtestClient.Get(ctx, client.ObjectKey{Name: crName}, cr); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo %q: %v", crName, err)
+	}
+
+	if len(cr.Status.PodReferences) != 1 {
+		t.Fatalf("PodReferences = %d, want 1", len(cr.Status.PodReferences))
+	}
+	if cr.Status.PodReferences[0].Name != pod.Name {
+		t.Errorf("PodReferences[0].Name = %q, want %q", cr.Status.PodReferences[0].Name, pod.Name)
+	}
+	if cr.Status.LastSeenAt == nil {
+		t.Error("LastSeenAt = nil, want the status written by Reconcile")
 	}
 }
