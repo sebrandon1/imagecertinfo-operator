@@ -19,6 +19,7 @@ The operator exposes metrics at the `/metrics` endpoint. All metrics use the `im
 | `imagecertinfo_pyxis_requests_total` | Counter | `status`, `endpoint` | Total Pyxis API requests |
 | `imagecertinfo_pyxis_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
 | `imagecertinfo_pyxis_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
+| `imagecertinfo_pyxis_cache_entries` | Gauge | - | Number of entries resident in the cache |
 
 ## Reconciliation Metrics
 
@@ -68,6 +69,7 @@ sum(rate(imagecertinfo_reconcile_total[5m])) * 100
 | `imagecertinfo_dockerhub_requests_total` | Counter | `status`, `endpoint` | Total Docker Hub API requests |
 | `imagecertinfo_dockerhub_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
 | `imagecertinfo_dockerhub_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
+| `imagecertinfo_dockerhub_cache_entries` | Gauge | - | Number of entries resident in the cache |
 
 ## OpenShift Monitoring Integration
 
