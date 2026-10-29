@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -704,6 +706,76 @@ func TestPodReconciler_RefreshSingleImage_NotCertified(t *testing.T) {
 
 	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusNotCertified {
 		t.Errorf("CertificationStatus = %v, want NotCertified", updatedCR.Status.CertificationStatus)
+	}
+}
+
+const testCVE = "CVE-2026-0001"
+
+func TestBuildCVEAnnotation(t *testing.T) {
+	cves := make([]string, 10000)
+	for i := range cves {
+		cves[i] = fmt.Sprintf("CVE-2026-%05d", i)
+	}
+
+	got, truncated := buildCVEAnnotation(cves)
+
+	if !truncated {
+		t.Fatal("expected a truncated annotation for 10000 CVEs")
+	}
+	if len(got) > MaxCVEAnnotationBytes {
+		t.Errorf("annotation length = %d, want <= %d", len(got), MaxCVEAnnotationBytes)
+	}
+	if !strings.HasSuffix(got, cveTruncationSentinel+"1") && !strings.Contains(got, cveTruncationSentinel) {
+		t.Errorf("annotation does not carry the truncation sentinel: %.80s", got)
+	}
+
+	// A short list is written verbatim with no sentinel.
+	small := []string{testCVE, "CVE-2026-0002"}
+	value, truncated := buildCVEAnnotation(small)
+	if truncated {
+		t.Error("short list must not be truncated")
+	}
+	if value != testCVE+",CVE-2026-0002" {
+		t.Errorf("value = %q, want the joined list", value)
+	}
+}
+
+func TestUpdateCVEAnnotations_SkipsUnchangedValue(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	name := testCRName
+	cr := &securityv1alpha1.ImageCertificationInfo{}
+	cr.Name = name
+	cr.Annotations = map[string]string{AnnotationCVEs: testCVE}
+
+	patches := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object,
+				patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := reconciler.updateCVEAnnotations(ctx, name, []string{testCVE}); err != nil {
+		t.Fatalf("updateCVEAnnotations() error = %v", err)
+	}
+	if patches != 0 {
+		t.Errorf("patches = %d, want 0 for an unchanged list", patches)
+	}
+
+	if err := reconciler.updateCVEAnnotations(ctx, name, []string{"CVE-2026-0002"}); err != nil {
+		t.Fatalf("updateCVEAnnotations() error = %v", err)
+	}
+	if patches != 1 {
+		t.Errorf("patches = %d, want 1 after the list changed", patches)
 	}
 }
 
