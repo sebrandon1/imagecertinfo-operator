@@ -374,15 +374,17 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 	podReconciler.StartCleanupLoop(ctx, cleanupInterval)
 
-	// Start cache cleanup loops if using cached clients
-	if cachedClient, ok := pyxisClient.(*pyxis.CachedClient); ok {
-		cachedClient.StartCleanupLoop(ctx, pyxisCacheTTL/2)
+	// Start cache cleanup loops if using cached clients. A client that is not
+	// cache-wrapped is reported instead of being skipped silently, so an
+	// operator can tell that caching is inactive.
+	if !startCacheCleanup(ctx, pyxisClient, pyxisCacheTTL/2) && pyxisClient != nil {
+		setupLog.Info("Pyxis client is not cache-wrapped, cache cleanup is inactive")
 	}
-	if cachedClient, ok := dockerHubClient.(*dockerhub.CachedClient); ok {
-		cachedClient.StartCleanupLoop(ctx, dockerHubCacheTTL/2)
+	if !startCacheCleanup(ctx, dockerHubClient, dockerHubCacheTTL/2) && dockerHubClient != nil {
+		setupLog.Info("Docker Hub client is not cache-wrapped, cache cleanup is inactive")
 	}
-	if cachedClient, ok := quayClient.(*quaylib.CachedClient); ok {
-		cachedClient.StartCleanupLoop(ctx, quayCacheTTL/2)
+	if !startCacheCleanup(ctx, quayClient, quayCacheTTL/2) && quayClient != nil {
+		setupLog.Info("Quay.io client is not cache-wrapped, cache cleanup is inactive")
 	}
 
 	// Start the periodic refresh loop for Pyxis data
@@ -407,4 +409,21 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// cacheCleanupStarter is implemented by cached clients that can prune expired
+// entries on a timer.
+type cacheCleanupStarter interface {
+	StartCleanupLoop(ctx context.Context, interval time.Duration)
+}
+
+// startCacheCleanup starts the periodic cache cleanup loop for a cache-wrapped
+// client and reports whether the client supported it.
+func startCacheCleanup(ctx context.Context, c any, interval time.Duration) bool {
+	starter, ok := c.(cacheCleanupStarter)
+	if !ok {
+		return false
+	}
+	starter.StartCleanupLoop(ctx, interval)
+	return true
 }
