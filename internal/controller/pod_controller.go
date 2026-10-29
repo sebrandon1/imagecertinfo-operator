@@ -247,11 +247,21 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 		},
 	}
 
+	// Write the status on the object returned by Create: it carries the
+	// server-assigned resourceVersion, so no read is needed. Re-fetching here
+	// would go through the informer cache, which has not observed the create
+	// yet and would fail the write with NotFound.
 	initialStatus := cr.Status
-	if err := r.updateCRStatus(ctx, cr.Name, func(latest *securityv1alpha1.ImageCertificationInfo) {
-		latest.Status = initialStatus
-	}); err != nil {
-		return err
+	if err := r.Status().Update(ctx, cr); err != nil {
+		if !apierrors.IsConflict(err) {
+			return err
+		}
+		// Another writer bumped the object; re-apply on the latest version.
+		if err := r.updateCRStatus(ctx, cr.Name, func(latest *securityv1alpha1.ImageCertificationInfo) {
+			latest.Status = initialStatus
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Emit event and record metrics
