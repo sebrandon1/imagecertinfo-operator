@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -1144,5 +1145,182 @@ func TestPodReconciler_UpdatePodReferences_RetriesOnConflict(t *testing.T) {
 	}
 	if !found {
 		t.Error("pod reference was not persisted after the conflict retry")
+	}
+}
+
+func TestPodReconciler_UpdatePodReferences_ThrottlesLastSeenAt(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	podRef := securityv1alpha1.PodReference{
+		Namespace: testNamespace,
+		Name:      testExistingPod,
+		Container: testContainer,
+	}
+
+	newCR := func(lastSeen metav1.Time) *securityv1alpha1.ImageCertificationInfo {
+		cr := &securityv1alpha1.ImageCertificationInfo{}
+		cr.Name = testCRName
+		cr.Labels = map[string]string{LabelOperatorVersion: version.Version}
+		cr.Status.LastSeenAt = &lastSeen
+		cr.Status.PodReferences = []securityv1alpha1.PodReference{podRef}
+		return cr
+	}
+
+	tests := []struct {
+		name        string
+		lastSeen    metav1.Time
+		wantUpdates int
+	}{
+		{
+			name:        "recent reference is not rewritten",
+			lastSeen:    metav1.Now(),
+			wantUpdates: 0,
+		},
+		{
+			name:        "stale reference is refreshed",
+			lastSeen:    metav1.NewTime(time.Now().Add(-2 * lastSeenRefreshWindow)),
+			wantUpdates: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updates := 0
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(newCR(tt.lastSeen)).
+				WithStatusSubresource(newCR(tt.lastSeen)).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(ctx context.Context, c client.Client, _ string,
+						obj client.Object, opts ...client.SubResourceUpdateOption) error {
+						updates++
+						return c.SubResource("status").Update(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+
+			if err := reconciler.updatePodReferences(ctx, newCR(tt.lastSeen), podRef); err != nil {
+				t.Fatalf("updatePodReferences() error = %v", err)
+			}
+			if updates != tt.wantUpdates {
+				t.Errorf("status updates = %d, want %d", updates, tt.wantUpdates)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_UpdatePodReferences_WritesNewReference(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	cr := &securityv1alpha1.ImageCertificationInfo{}
+	cr.Name = testCRName
+	cr.Labels = map[string]string{LabelOperatorVersion: version.Version}
+	cr.Status.LastSeenAt = &metav1.Time{Time: time.Now()}
+
+	updates := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, _ string,
+				obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				updates++
+				return c.SubResource("status").Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+
+	podRef := securityv1alpha1.PodReference{
+		Namespace: testNamespace,
+		Name:      testPodName,
+		Container: testContainer,
+	}
+	if err := reconciler.updatePodReferences(ctx, cr, podRef); err != nil {
+		t.Fatalf("updatePodReferences() error = %v", err)
+	}
+	if updates != 1 {
+		t.Fatalf("status updates = %d, want 1", updates)
+	}
+
+	updated := &securityv1alpha1.ImageCertificationInfo{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, updated); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(updated.Status.PodReferences) != 1 {
+		t.Errorf("PodReferences = %d, want 1", len(updated.Status.PodReferences))
+	}
+}
+
+func TestPodDiscoveryPredicate(t *testing.T) {
+	newPod := func(phase corev1.PodPhase, imageIDs ...string) *corev1.Pod {
+		pod := &corev1.Pod{}
+		pod.Status.Phase = phase
+		for i, id := range imageIDs {
+			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+				Name:    fmt.Sprintf("c%d", i),
+				ImageID: id,
+			})
+		}
+		return pod
+	}
+
+	p := podDiscoveryPredicate()
+
+	if !p.Create(event.CreateEvent{Object: newPod(corev1.PodPending)}) {
+		t.Error("Create() = false, want true")
+	}
+	if !p.Delete(event.DeleteEvent{Object: newPod(corev1.PodPending)}) {
+		t.Error("Delete() = false, want true")
+	}
+	if p.Generic(event.GenericEvent{Object: newPod(corev1.PodPending)}) {
+		t.Error("Generic() = true, want false")
+	}
+
+	tests := []struct {
+		name string
+		old  *corev1.Pod
+		new  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "unchanged pod is ignored",
+			old:  newPod(corev1.PodRunning, "img-a"),
+			new:  newPod(corev1.PodRunning, "img-a"),
+			want: false,
+		},
+		{
+			name: "phase change is admitted",
+			old:  newPod(corev1.PodPending, "img-a"),
+			new:  newPod(corev1.PodRunning, "img-a"),
+			want: true,
+		},
+		{
+			name: "image ID change is admitted",
+			old:  newPod(corev1.PodRunning, "img-a"),
+			new:  newPod(corev1.PodRunning, "img-b"),
+			want: true,
+		},
+		{
+			name: "new container is admitted",
+			old:  newPod(corev1.PodRunning, "img-a"),
+			new:  newPod(corev1.PodRunning, "img-a", "img-b"),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.Update(event.UpdateEvent{ObjectOld: tt.old, ObjectNew: tt.new})
+			if got != tt.want {
+				t.Errorf("Update() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
