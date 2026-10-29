@@ -78,6 +78,7 @@ func main() {
 	var pyxisAPIKey string
 	var cleanupInterval time.Duration
 	var pyxisCacheTTL time.Duration
+	var pyxisCacheMaxEntries int
 	var pyxisRateLimit float64
 	var pyxisRateBurst int
 	var pyxisRefreshInterval time.Duration
@@ -85,6 +86,7 @@ func main() {
 	// Docker Hub configuration flags
 	var dockerHubEnabled bool
 	var dockerHubCacheTTL time.Duration
+	var dockerHubCacheMaxEntries int
 	var dockerHubRateLimit float64
 	var dockerHubRateBurst int
 
@@ -128,6 +130,8 @@ func main() {
 		"Interval for cleaning up stale pod references")
 	flag.DurationVar(&pyxisCacheTTL, "pyxis-cache-ttl", pyxis.DefaultCacheTTL,
 		"TTL for cached Pyxis API responses (default 1 hour)")
+	flag.IntVar(&pyxisCacheMaxEntries, "pyxis-cache-max-entries", pyxis.DefaultCacheMaxEntries,
+		"Maximum number of cached Pyxis responses (0 or less for unlimited, default 10000)")
 	flag.Float64Var(&pyxisRateLimit, "pyxis-rate-limit", pyxis.DefaultRateLimit,
 		"Rate limit for Pyxis API requests per second (default 10)")
 	flag.IntVar(&pyxisRateBurst, "pyxis-rate-burst", pyxis.DefaultRateBurst,
@@ -140,6 +144,8 @@ func main() {
 		"Enable Docker Hub metadata enrichment for docker.io images")
 	flag.DurationVar(&dockerHubCacheTTL, "dockerhub-cache-ttl", dockerhub.DefaultCacheTTL,
 		"TTL for cached Docker Hub API responses (default 1 hour)")
+	flag.IntVar(&dockerHubCacheMaxEntries, "dockerhub-cache-max-entries", dockerhub.DefaultCacheMaxEntries,
+		"Maximum number of cached Docker Hub responses (0 or less for unlimited, default 10000)")
 	flag.Float64Var(&dockerHubRateLimit, "dockerhub-rate-limit", dockerhub.DefaultRateLimit,
 		"Rate limit for Docker Hub API requests per second (default 5)")
 	flag.IntVar(&dockerHubRateBurst, "dockerhub-rate-burst", dockerhub.DefaultRateBurst,
@@ -322,7 +328,8 @@ func main() {
 		baseClient := pyxis.NewHTTPClient(clientOpts...)
 
 		// Wrap with caching and rate limiting
-		pyxisClient = pyxis.NewCachedRateLimitedClient(baseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst)
+		pyxisClient = pyxis.NewCachedRateLimitedClient(
+			baseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst, pyxisCacheMaxEntries)
 	}
 
 	// Initialize Docker Hub client if enabled
@@ -336,7 +343,7 @@ func main() {
 
 		// Wrap with caching and rate limiting
 		dockerHubClient = dockerhub.NewCachedRateLimitedClient(
-			baseDockerHubClient, dockerHubCacheTTL, dockerHubRateLimit, dockerHubRateBurst)
+			baseDockerHubClient, dockerHubCacheTTL, dockerHubRateLimit, dockerHubRateBurst, dockerHubCacheMaxEntries)
 	}
 
 	// Initialize Quay.io client if enabled

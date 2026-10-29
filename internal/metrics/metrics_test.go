@@ -75,6 +75,8 @@ func TestMetricsRegistered(t *testing.T) {
 		"imagecertinfo_quay_requests_total":                {},
 		"imagecertinfo_quay_request_duration_seconds":      {},
 		"imagecertinfo_quay_cache_hits_total":              {},
+		"imagecertinfo_pyxis_cache_entries":                {},
+		"imagecertinfo_dockerhub_cache_entries":            {},
 	}
 
 	gotNames := make(map[string]struct{}, len(metricFamilies))

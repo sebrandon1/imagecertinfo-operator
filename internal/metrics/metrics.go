@@ -236,6 +236,26 @@ var (
 		[]string{labelResult},
 	)
 
+	// Cache Size Metrics
+
+	// PyxisCacheEntries tracks the number of resident Pyxis cache entries
+	PyxisCacheEntries = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: MetricsNamespace,
+			Name:      "pyxis_cache_entries",
+			Help:      "Number of entries currently resident in the Pyxis cache",
+		},
+	)
+
+	// DockerHubCacheEntries tracks the number of resident Docker Hub cache entries
+	DockerHubCacheEntries = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: MetricsNamespace,
+			Name:      "dockerhub_cache_entries",
+			Help:      "Number of entries currently resident in the Docker Hub cache",
+		},
+	)
+
 	// Quay.io API Metrics
 
 	// QuayRequestsTotal tracks total Quay.io API requests
@@ -298,6 +318,9 @@ func init() {
 		DockerHubRequestsTotal,
 		DockerHubRequestDuration,
 		DockerHubCacheHits,
+		// Cache size metrics
+		PyxisCacheEntries,
+		DockerHubCacheEntries,
 		// Quay.io API metrics
 		QuayRequestsTotal,
 		QuayRequestDuration,
@@ -438,6 +461,16 @@ func RecordDockerHubCacheHit() {
 // RecordDockerHubCacheMiss records a Docker Hub cache miss
 func RecordDockerHubCacheMiss() {
 	DockerHubCacheHits.WithLabelValues("miss").Inc()
+}
+
+// SetPyxisCacheEntries reports the number of resident Pyxis cache entries
+func SetPyxisCacheEntries(count int) {
+	PyxisCacheEntries.Set(float64(count))
+}
+
+// SetDockerHubCacheEntries reports the number of resident Docker Hub cache entries
+func SetDockerHubCacheEntries(count int) {
+	DockerHubCacheEntries.Set(float64(count))
 }
 
 // RecordQuayRequest records a Quay.io API request metric

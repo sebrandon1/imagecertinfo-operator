@@ -29,6 +29,9 @@ import (
 // DefaultCacheTTL is the default time-to-live for cache entries
 const DefaultCacheTTL = 1 * time.Hour
 
+// DefaultCacheMaxEntries is the default cap on resident cache entries
+const DefaultCacheMaxEntries = 10_000
+
 // DefaultRateLimit is the default rate limit (requests per second)
 const DefaultRateLimit = 5.0
 
@@ -43,10 +46,11 @@ type cacheEntry struct {
 
 // CachedClient wraps a Client with caching capabilities
 type CachedClient struct {
-	client Client
-	cache  map[string]cacheEntry
-	mu     sync.RWMutex
-	ttl    time.Duration
+	client     Client
+	cache      map[string]cacheEntry
+	mu         sync.RWMutex
+	ttl        time.Duration
+	maxEntries int
 }
 
 // CacheOption is a function that configures a CachedClient
@@ -59,12 +63,21 @@ func WithCacheTTL(ttl time.Duration) CacheOption {
 	}
 }
 
+// WithMaxEntries caps the number of resident entries. A value of zero or less
+// disables the cap, restoring the unbounded behaviour.
+func WithMaxEntries(maxEntries int) CacheOption {
+	return func(c *CachedClient) {
+		c.maxEntries = maxEntries
+	}
+}
+
 // NewCachedClient creates a new cached client wrapper
 func NewCachedClient(client Client, opts ...CacheOption) *CachedClient {
 	c := &CachedClient{
-		client: client,
-		cache:  make(map[string]cacheEntry),
-		ttl:    DefaultCacheTTL,
+		client:     client,
+		cache:      make(map[string]cacheEntry),
+		ttl:        DefaultCacheTTL,
+		maxEntries: DefaultCacheMaxEntries,
 	}
 
 	for _, opt := range opts {
@@ -104,14 +117,61 @@ func (c *CachedClient) GetRepositoryInfo(
 	}
 
 	// Store in cache
-	c.mu.Lock()
-	c.cache[key] = cacheEntry{
+	c.store(key, cacheEntry{
 		data:      data,
 		expiresAt: time.Now().Add(c.ttl),
-	}
-	c.mu.Unlock()
+	})
 
 	return data, nil
+}
+
+// store inserts an entry, evicting expired entries and then the entries
+// closest to expiry when the cache is at capacity.
+func (c *CachedClient) store(key string, entry cacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.maxEntries > 0 && len(c.cache) >= c.maxEntries {
+		c.cleanupExpiredLocked()
+		c.evictLocked()
+	}
+
+	c.cache[key] = entry
+
+	metrics.SetDockerHubCacheEntries(len(c.cache))
+}
+
+// evictLocked drops entries with the earliest expiry until there is room for
+// one more. The caller must hold the write lock.
+func (c *CachedClient) evictLocked() {
+	if c.maxEntries <= 0 {
+		return
+	}
+
+	for len(c.cache) >= c.maxEntries {
+		oldestKey := ""
+		var oldestExpiry time.Time
+
+		for key, entry := range c.cache {
+			if oldestKey == "" || entry.expiresAt.Before(oldestExpiry) {
+				oldestKey = key
+				oldestExpiry = entry.expiresAt
+			}
+		}
+
+		if oldestKey == "" {
+			return
+		}
+		delete(c.cache, oldestKey)
+	}
+}
+
+// Size returns the number of resident cache entries.
+func (c *CachedClient) Size() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return len(c.cache)
 }
 
 // IsHealthy delegates to the underlying client
@@ -122,8 +182,10 @@ func (c *CachedClient) IsHealthy(ctx context.Context) bool {
 // ClearCache removes all entries from the cache
 func (c *CachedClient) ClearCache() {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.cache = make(map[string]cacheEntry)
-	c.mu.Unlock()
+	metrics.SetDockerHubCacheEntries(0)
 }
 
 // CleanupExpired removes expired entries from the cache
@@ -131,7 +193,15 @@ func (c *CachedClient) CleanupExpired() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.cleanupExpiredLocked()
+	metrics.SetDockerHubCacheEntries(len(c.cache))
+}
+
+// cleanupExpiredLocked drops expired entries. The caller must hold the write
+// lock.
+func (c *CachedClient) cleanupExpiredLocked() {
 	now := time.Now()
+
 	for key, entry := range c.cache {
 		if now.After(entry.expiresAt) {
 			delete(c.cache, key)
@@ -211,9 +281,11 @@ func (c *RateLimitedClient) IsHealthy(ctx context.Context) bool {
 }
 
 // NewCachedRateLimitedClient creates a client with both caching and rate limiting
-func NewCachedRateLimitedClient(baseClient Client, cacheTTL time.Duration, rateLimit float64, burst int) Client {
+func NewCachedRateLimitedClient(
+	baseClient Client, cacheTTL time.Duration, rateLimit float64, burst, cacheMaxEntries int,
+) Client {
 	// Apply rate limiting first, then caching
 	rateLimited := NewRateLimitedClient(baseClient, WithRateLimit(rateLimit), WithBurst(burst))
-	cached := NewCachedClient(rateLimited, WithCacheTTL(cacheTTL))
+	cached := NewCachedClient(rateLimited, WithCacheTTL(cacheTTL), WithMaxEntries(cacheMaxEntries))
 	return cached
 }
