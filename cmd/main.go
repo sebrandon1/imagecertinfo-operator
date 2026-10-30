@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -77,6 +78,7 @@ func main() {
 	var pyxisBaseURL string
 	var pyxisAPIKey string
 	var cleanupInterval time.Duration
+	var enrichmentWorkers int
 	var pyxisCacheTTL time.Duration
 	var pyxisCacheMaxEntries int
 	var pyxisRateLimit float64
@@ -128,6 +130,8 @@ func main() {
 		"Optional API key for Pyxis authentication (public API works without auth, can also use PYXIS_API_KEY env var)")
 	flag.DurationVar(&cleanupInterval, "cleanup-interval", 5*time.Minute,
 		"Interval for cleaning up stale pod references")
+	flag.IntVar(&enrichmentWorkers, "enrichment-workers", controller.DefaultEnrichmentWorkers,
+		"Number of concurrent workers enriching newly discovered images (default 4)")
 	flag.DurationVar(&pyxisCacheTTL, "pyxis-cache-ttl", pyxis.DefaultCacheTTL,
 		"TTL for cached Pyxis API responses (default 1 hour)")
 	flag.IntVar(&pyxisCacheMaxEntries, "pyxis-cache-max-entries", pyxis.DefaultCacheMaxEntries,
@@ -377,27 +381,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start the cleanup loop for stale pod references
+	// Start the cleanup loop for stale pod references as a manager Runnable, so
+	// it runs only on the leader and stops with the manager.
 	ctx := ctrl.SetupSignalHandler()
-	podReconciler.StartCleanupLoop(ctx, cleanupInterval)
+	addRunnable(mgr, "cleanup loop", func(ctx context.Context) error {
+		return podReconciler.StartCleanupLoop(ctx, cleanupInterval)
+	})
+
+	// Start the bounded enrichment worker pool that the reconciler feeds.
+	if err := podReconciler.SetupEnrichmentWorkers(mgr, enrichmentWorkers); err != nil {
+		setupLog.Error(err, "unable to set up enrichment workers")
+		os.Exit(1)
+	}
 
 	// Start cache cleanup loops if using cached clients. A client that is not
 	// cache-wrapped is reported instead of being skipped silently, so an
 	// operator can tell that caching is inactive.
-	if !startCacheCleanup(ctx, pyxisClient, pyxisCacheTTL/2) && pyxisClient != nil {
+	if !addCacheCleanup(mgr, pyxisClient, pyxisCacheTTL/2) && pyxisClient != nil {
 		setupLog.Info("Pyxis client is not cache-wrapped, cache cleanup is inactive")
 	}
-	if !startCacheCleanup(ctx, dockerHubClient, dockerHubCacheTTL/2) && dockerHubClient != nil {
+	if !addCacheCleanup(mgr, dockerHubClient, dockerHubCacheTTL/2) && dockerHubClient != nil {
 		setupLog.Info("Docker Hub client is not cache-wrapped, cache cleanup is inactive")
 	}
-	if !startCacheCleanup(ctx, quayClient, quayCacheTTL/2) && quayClient != nil {
+	if !addCacheCleanup(mgr, quayClient, quayCacheTTL/2) && quayClient != nil {
 		setupLog.Info("Quay.io client is not cache-wrapped, cache cleanup is inactive")
 	}
 
 	// Start the periodic refresh loop for Pyxis data
 	if pyxisRefreshInterval > 0 && pyxisClient != nil {
 		setupLog.Info("Starting Pyxis refresh loop", "interval", pyxisRefreshInterval)
-		podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
+		addRunnable(mgr, "refresh loop", func(ctx context.Context) error {
+			return podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
+		})
 	}
 
 	// +kubebuilder:scaffold:builder
@@ -418,19 +433,72 @@ func main() {
 	}
 }
 
+// addRunnable registers a manager Runnable, exiting if registration fails. A
+// plain RunnableFunc joins the leader-election group, so periodic work that
+// writes CR status runs on one replica only.
+func addRunnable(mgr ctrl.Manager, what string, run manager.RunnableFunc) {
+	if err := mgr.Add(run); err != nil {
+		setupLog.Error(err, "unable to add runnable to the manager", "runnable", what)
+		os.Exit(1)
+	}
+}
+
 // cacheCleanupStarter is implemented by cached clients that can prune expired
 // entries on a timer.
 type cacheCleanupStarter interface {
 	StartCleanupLoop(ctx context.Context, interval time.Duration)
 }
 
-// startCacheCleanup starts the periodic cache cleanup loop for a cache-wrapped
-// client and reports whether the client supported it.
-func startCacheCleanup(ctx context.Context, c any, interval time.Duration) bool {
+// cacheCleanupRunnable runs a cached client's prune loop under the manager.
+// Cache state is local to the replica, so pruning does not need leader
+// election; every replica prunes its own cache.
+type cacheCleanupRunnable struct {
+	starter  cacheCleanupStarter
+	interval time.Duration
+}
+
+// Start implements manager.Runnable. StartCleanupLoop already returns once it
+// has spawned its loop, so this waits for shutdown to keep the runnable alive.
+func (c cacheCleanupRunnable) Start(ctx context.Context) error {
+	c.starter.StartCleanupLoop(ctx, c.interval)
+	<-ctx.Done()
+
+	return nil
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable.
+func (c cacheCleanupRunnable) NeedLeaderElection() bool {
+	return false
+}
+
+// cacheCleanupRunnableFor returns the runnable that prunes a cache-wrapped
+// client, reporting whether the client supports cleanup at all.
+func cacheCleanupRunnableFor(c any, interval time.Duration) (cacheCleanupRunnable, bool) {
+	if c == nil {
+		return cacheCleanupRunnable{}, false
+	}
+
 	starter, ok := c.(cacheCleanupStarter)
+	if !ok {
+		return cacheCleanupRunnable{}, false
+	}
+
+	return cacheCleanupRunnable{starter: starter, interval: interval}, true
+}
+
+// addCacheCleanup registers the periodic cache cleanup loop for a cache-wrapped
+// client and reports whether the client supported it.
+func addCacheCleanup(mgr ctrl.Manager, c any, interval time.Duration) bool {
+	runnable, ok := cacheCleanupRunnableFor(c, interval)
 	if !ok {
 		return false
 	}
-	starter.StartCleanupLoop(ctx, interval)
+
+	if err := mgr.Add(runnable); err != nil {
+		setupLog.Error(err, "unable to add cache cleanup loop to the manager")
+
+		return false
+	}
+
 	return true
 }

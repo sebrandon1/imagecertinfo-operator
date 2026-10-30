@@ -39,6 +39,26 @@ flowchart LR
 6. **ImageCertificationInfo CR** is created/updated with certification data, Docker Hub metadata, and pod references
 7. **Metrics** are emitted for monitoring via Prometheus
 
+## Background Work Lifecycle
+
+All periodic work runs as a controller-runtime manager Runnable, so it starts
+with the manager, stops on SIGTERM, and honors leader election:
+
+| Runnable | Leader elected | Work |
+|----------|----------------|------|
+| Pod controller | yes | Reconcile pod events and create/update CRs |
+| Cleanup loop | yes | Remove pod references for deleted pods every `--cleanup-interval` |
+| Refresh loop | yes | Re-enrich every CR every `--pyxis-refresh-interval`, after a 0–5 minute startup jitter |
+| Enrichment workers | yes | Drain the enrichment queue with `--enrichment-workers` workers |
+| Cache cleanup | no | Prune expired cache entries in each replica's local cache |
+
+The reconciler does not enrich inline. `createImageCertificationInfo` enqueues a
+request keyed by CR name, and the worker pool calls Pyxis, Docker Hub, or Quay
+outside the reconcile loop. A failed enrichment is requeued with exponential
+backoff up to 5 times, then left for the next refresh cycle. This bounds
+concurrency on a first start in a large cluster, cancels cleanly on shutdown,
+and retries API blips within minutes instead of a day.
+
 ## How It Differs from Red Hat ACS
 
 | Capability | ImageCertInfo Operator | Red Hat ACS |

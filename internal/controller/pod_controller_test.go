@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,8 +41,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	quaylib "github.com/sebrandon1/go-quay/lib"
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
@@ -456,18 +459,24 @@ func TestPodReconciler_StartCleanupLoop(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
 
-	// Start cleanup loop with short interval
-	reconciler.StartCleanupLoop(ctx, 100*time.Millisecond)
+	// The loop blocks until the context is cancelled so the manager can own
+	// its lifecycle.
+	go func() { done <- reconciler.StartCleanupLoop(ctx, 10*time.Millisecond) }()
 
-	// Let it run briefly
-	time.Sleep(150 * time.Millisecond)
-
-	// Cancel context to stop the loop
+	// Let it run through a few ticks.
+	time.Sleep(50 * time.Millisecond)
 	cancel()
 
-	// Give time for goroutine to exit
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("StartCleanupLoop() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StartCleanupLoop() did not return after the context was cancelled")
+	}
 }
 
 func TestPodReconciler_RefreshAllImages(t *testing.T) {
@@ -848,10 +857,12 @@ func TestPodReconciler_StartRefreshLoop(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
 
 	// Start refresh loop - note: it has a random startup delay (0-5 min)
 	// so we can't easily test the actual refresh, just that it starts and stops
-	reconciler.StartRefreshLoop(ctx, 1*time.Hour)
+	// on shutdown.
+	go func() { done <- reconciler.StartRefreshLoop(ctx, 1*time.Hour) }()
 
 	// Give some time for the goroutine to start
 	time.Sleep(50 * time.Millisecond)
@@ -859,8 +870,405 @@ func TestPodReconciler_StartRefreshLoop(t *testing.T) {
 	// Cancel context to stop the loop
 	cancel()
 
-	// Give time for goroutine to exit
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("StartRefreshLoop() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StartRefreshLoop() did not return after the context was cancelled")
+	}
+}
+
+// flakyPyxisClient fails the first `failures` lookups, then succeeds with no
+// certification data.
+type flakyPyxisClient struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (f *flakyPyxisClient) GetImageCertification(
+	ctx context.Context, registry, repository, digest string,
+) (*pyxis.CertificationData, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	if f.calls <= f.failures {
+		return nil, errors.New("pyxis temporarily unavailable")
+	}
+
+	return nil, nil
+}
+
+func (f *flakyPyxisClient) IsHealthy(ctx context.Context) bool { return true }
+
+func (f *flakyPyxisClient) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.calls
+}
+
+func newEnrichmentTestReconciler(t *testing.T, pyxisClient pyxis.Client) *PodReconciler {
+	t.Helper()
+
+	scheme := newTestScheme()
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Name: testCRName,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: testRegistry + "/" + testRepository + "@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			FirstSeenAt:         &now,
+			LastSeenAt:          &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	return &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: pyxisClient,
+		EnrichQueue: newEnrichQueue(),
+	}
+}
+
+func TestPodReconciler_EnqueuesEnrichment(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	pod := &corev1.Pod{
+		Name:      testPodName,
+		Namespace: testNamespace,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:    testContainer,
+					ImageID: "docker-pullable://" + testRegistry + "/" + testRepository + "@" + testDigest,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		WithStatusSubresource(&securityv1alpha1.ImageCertificationInfo{}).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		EnrichQueue: newEnrichQueue(),
+	}
+	defer reconciler.EnrichQueue.ShutDown()
+
+	if _, err := reconciler.Reconcile(ctx, reconcile.Request{
+		//nolint:modernize // a struct field value cannot elide its literal type
+		NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName},
+	}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	item, shutdown := reconciler.EnrichQueue.Get()
+	if shutdown {
+		t.Fatal("enrichment queue was shut down, want one request")
+	}
+	reconciler.EnrichQueue.Done(item)
+	reconciler.EnrichQueue.Forget(item)
+
+	if item.crName != testCRName {
+		t.Errorf("enqueued crName = %q, want %q", item.crName, testCRName)
+	}
+	if item.ref.Digest != testDigest {
+		t.Errorf("enqueued digest = %q, want %q", item.ref.Digest, testDigest)
+	}
+}
+
+func TestProcessEnrichRequest(t *testing.T) {
+	item := enrichRequest{
+		crName: testCRName,
+		ref: image.Reference{
+			Registry:   testRegistry,
+			Repository: testRepository,
+			Digest:     testDigest,
+		},
+	}
+
+	t.Run("success forgets the request", func(t *testing.T) {
+		reconciler := newEnrichmentTestReconciler(t, &MockPyxisClient{
+			CertData: &pyxis.CertificationData{ImageID: "img-1"},
+		})
+		defer reconciler.EnrichQueue.ShutDown()
+
+		reconciler.processEnrichRequest(context.Background(), item)
+
+		if got := reconciler.EnrichQueue.NumRequeues(item); got != 0 {
+			t.Errorf("NumRequeues() = %d, want 0 after a successful enrichment", got)
+		}
+	})
+
+	t.Run("failure requeues with backoff", func(t *testing.T) {
+		reconciler := newEnrichmentTestReconciler(t, &MockPyxisClient{
+			Err: errors.New("pyxis unavailable"),
+		})
+		defer reconciler.EnrichQueue.ShutDown()
+
+		reconciler.processEnrichRequest(context.Background(), item)
+
+		if got := reconciler.EnrichQueue.NumRequeues(item); got != 1 {
+			t.Errorf("NumRequeues() = %d, want 1 so the request is retried", got)
+		}
+	})
+
+	t.Run("gives up after the retry cap", func(t *testing.T) {
+		reconciler := newEnrichmentTestReconciler(t, &MockPyxisClient{
+			Err: errors.New("pyxis unavailable"),
+		})
+		defer reconciler.EnrichQueue.ShutDown()
+
+		for range maxEnrichmentRetries + 1 {
+			reconciler.processEnrichRequest(context.Background(), item)
+		}
+
+		if got := reconciler.EnrichQueue.NumRequeues(item); got != 0 {
+			t.Errorf("NumRequeues() = %d, want 0 after the retry cap dropped the request", got)
+		}
+	})
+
+	t.Run("does not requeue on shutdown", func(t *testing.T) {
+		reconciler := newEnrichmentTestReconciler(t, &MockPyxisClient{
+			Err: errors.New("pyxis unavailable"),
+		})
+		defer reconciler.EnrichQueue.ShutDown()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		reconciler.processEnrichRequest(ctx, item)
+
+		if got := reconciler.EnrichQueue.NumRequeues(item); got != 0 {
+			t.Errorf("NumRequeues() = %d, want 0 when the manager is shutting down", got)
+		}
+	})
+}
+
+func TestRunEnrichmentWorkers_RetriesFailingClient(t *testing.T) {
+	pyxisClient := &flakyPyxisClient{failures: 1}
+	reconciler := newEnrichmentTestReconciler(t, pyxisClient)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		reconciler.runEnrichmentWorkers(ctx, 1)
+	}()
+
+	reconciler.EnrichQueue.Add(enrichRequest{
+		crName: testCRName,
+		ref:    image.Reference{Registry: testRegistry, Repository: testRepository, Digest: testDigest},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pyxisClient.callCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("enrichment called %d times, want at least 2 (one retry)", pyxisClient.callCount())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runEnrichmentWorkers() did not return after the context was cancelled")
+	}
+}
+
+// stubDockerHubClient implements dockerhub.Client for dispatch tests.
+type stubDockerHubClient struct {
+	info   *dockerhub.RepositoryInfo
+	err    error
+	called bool
+}
+
+func (s *stubDockerHubClient) GetRepositoryInfo(
+	ctx context.Context, namespace, repository string,
+) (*dockerhub.RepositoryInfo, error) {
+	s.called = true
+
+	return s.info, s.err
+}
+
+func (s *stubDockerHubClient) IsHealthy(ctx context.Context) bool { return true }
+
+// stubQuayClient implements quaylib.RepositoryReader for dispatch tests.
+type stubQuayClient struct {
+	repo   quaylib.RepositoryWithTags
+	err    error
+	called bool
+}
+
+func (s *stubQuayClient) GetRepository(
+	ctx context.Context, namespace, repository string,
+) (quaylib.RepositoryWithTags, error) {
+	s.called = true
+
+	return s.repo, s.err
+}
+
+func (s *stubQuayClient) ListTags(
+	ctx context.Context, namespace, repository string, limit int, onlyActive bool,
+) (*quaylib.RepositoryTags, error) {
+	return nil, nil
+}
+
+func (s *stubQuayClient) ListAllTags(
+	ctx context.Context, namespace, repository string, onlyActive bool,
+) ([]quaylib.Tag, error) {
+	return nil, nil
+}
+
+func (s *stubQuayClient) GetManifestSecurity(
+	ctx context.Context, namespace, repository, manifestRef string, vulnerabilities bool,
+) (*quaylib.SecurityScan, error) {
+	return nil, nil
+}
+
+func (s *stubQuayClient) GetManifest(
+	ctx context.Context, namespace, repository, manifestRef string,
+) (*quaylib.Manifest, error) {
+	return nil, nil
+}
+
+func (s *stubQuayClient) GetManifestLabels(
+	ctx context.Context, namespace, repository, manifestRef string,
+) (*quaylib.ManifestLabels, error) {
+	return nil, nil
+}
+
+// newDispatchTestClient returns a fake client holding one CR for the given
+// registry and repository.
+func newDispatchTestClient(t *testing.T, name, registry, repository string) client.Client {
+	t.Helper()
+
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Name: name,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: registry + "/" + repository + "@" + testDigest,
+			Registry:           registry,
+			Repository:         repository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+		},
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+}
+
+func TestPodReconciler_EnrichDispatchesByRegistry(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("docker.io uses the Docker Hub client", func(t *testing.T) {
+		dockerHub := &stubDockerHubClient{info: &dockerhub.RepositoryInfo{IsOfficial: true}}
+		reconciler := &PodReconciler{
+			Client:          newDispatchTestClient(t, "docker.io.library.nginx", RegistryDockerHub, "library/nginx"),
+			DockerHubClient: dockerHub,
+		}
+
+		item := enrichRequest{
+			crName: "docker.io.library.nginx",
+			ref:    image.Reference{Registry: RegistryDockerHub, Repository: "library/nginx", Digest: testDigest},
+		}
+		if err := reconciler.enrich(ctx, item); err != nil {
+			t.Fatalf("enrich() error = %v", err)
+		}
+		if !dockerHub.called {
+			t.Error("Docker Hub client was not called for a docker.io image")
+		}
+	})
+
+	t.Run("quay.io uses the Quay client", func(t *testing.T) {
+		quayClient := &stubQuayClient{}
+		reconciler := &PodReconciler{
+			Client:     newDispatchTestClient(t, "quay.io.ns.repo", RegistryQuayIO, "ns/repo"),
+			QuayClient: quayClient,
+		}
+
+		item := enrichRequest{
+			crName: "quay.io.ns.repo",
+			ref:    image.Reference{Registry: RegistryQuayIO, Repository: "ns/repo", Digest: testDigest},
+		}
+		if err := reconciler.enrich(ctx, item); err != nil {
+			t.Fatalf("enrich() error = %v", err)
+		}
+		if !quayClient.called {
+			t.Error("Quay client was not called for a quay.io image")
+		}
+	})
+
+	t.Run("unknown registry with no client is a no-op", func(t *testing.T) {
+		reconciler := &PodReconciler{}
+
+		item := enrichRequest{
+			crName: "example.com.ns.repo",
+			ref:    image.Reference{Registry: "example.com", Repository: "ns/repo", Digest: testDigest},
+		}
+		if err := reconciler.enrich(ctx, item); err != nil {
+			t.Errorf("enrich() error = %v, want nil for a registry without a client", err)
+		}
+	})
+}
+
+func TestPodReconciler_EnqueueEnrichment_NoQueue(t *testing.T) {
+	// A reconciler without a manager (as in these tests) must not panic.
+	reconciler := &PodReconciler{}
+	reconciler.enqueueEnrichment(testCRName, &image.Reference{Registry: testRegistry})
+}
+
+func TestPodReconciler_SetupEnrichmentWorkers(t *testing.T) {
+	if envtestConfig == nil {
+		t.Skip("envtest is not available; set KUBEBUILDER_ASSETS to run this test")
+	}
+
+	mgr, err := ctrl.NewManager(envtestConfig, ctrl.Options{
+		Scheme:                 newTestScheme(),
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	reconciler := &PodReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+	if err := reconciler.SetupEnrichmentWorkers(mgr, 0); err != nil {
+		t.Fatalf("SetupEnrichmentWorkers() error = %v", err)
+	}
+	if reconciler.EnrichQueue == nil {
+		t.Error("EnrichQueue is nil after SetupEnrichmentWorkers()")
+	}
 }
 
 func TestDigestLabel(t *testing.T) {
@@ -1018,7 +1426,7 @@ func TestPodReconciler_CheckPyxisCertification_NotCertifiedClearsPayload(t *test
 		Repository: testRepository,
 		Digest:     testDigest,
 	}
-	reconciler.checkPyxisCertification(ctx, testCRName, ref)
+	_ = reconciler.checkPyxisCertification(ctx, testCRName, ref)
 
 	var updatedCR securityv1alpha1.ImageCertificationInfo
 	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updatedCR); err != nil {

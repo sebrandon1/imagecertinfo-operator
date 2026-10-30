@@ -40,6 +40,11 @@ Priority order: `--pyxis-api-key` flag → `PYXIS_API_KEY` env var → Secret.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--cleanup-interval` | Interval for cleaning up stale pod references | `5m` |
+| `--enrichment-workers` | Number of concurrent workers enriching newly discovered images | `4` |
+
+Failed enrichments are retried with exponential backoff up to 5 times before the
+image is left for the next refresh cycle. Only the leader replica runs the
+cleanup loop, the refresh loop, and the enrichment workers.
 
 ## Metrics and Health
 
