@@ -25,42 +25,84 @@ import (
 type fakeCachedClient struct {
 	started  bool
 	interval time.Duration
+	stopped  bool
 }
 
-func (f *fakeCachedClient) StartCleanupLoop(_ context.Context, interval time.Duration) {
+func (f *fakeCachedClient) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 	f.started = true
 	f.interval = interval
+	<-ctx.Done()
+	f.stopped = true
 }
 
 // plainClient does not implement StartCleanupLoop.
 type plainClient struct{}
 
-func TestStartCacheCleanup(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("cache-wrapped client starts the loop", func(t *testing.T) {
+func TestCacheCleanupRunnableFor(t *testing.T) {
+	t.Run("cache-wrapped client yields a runnable", func(t *testing.T) {
 		client := &fakeCachedClient{}
 
-		if ok := startCacheCleanup(ctx, client, time.Minute); !ok {
-			t.Fatal("startCacheCleanup() = false, want true for a cached client")
+		runnable, ok := cacheCleanupRunnableFor(client, time.Minute)
+		if !ok {
+			t.Fatal("cacheCleanupRunnableFor() = false, want true for a cached client")
 		}
-		if !client.started {
-			t.Error("StartCleanupLoop was not called")
+		if runnable.interval != time.Minute {
+			t.Errorf("interval = %v, want 1m", runnable.interval)
 		}
-		if client.interval != time.Minute {
-			t.Errorf("interval = %v, want 1m", client.interval)
+		if runnable.NeedLeaderElection() {
+			t.Error("NeedLeaderElection() = true, want false: cache pruning is per-replica")
 		}
 	})
 
 	t.Run("uncached client is reported", func(t *testing.T) {
-		if ok := startCacheCleanup(ctx, &plainClient{}, time.Minute); ok {
-			t.Error("startCacheCleanup() = true, want false so the caller can log it")
+		if _, ok := cacheCleanupRunnableFor(&plainClient{}, time.Minute); ok {
+			t.Error("cacheCleanupRunnableFor() = true, want false so the caller can log it")
 		}
 	})
 
 	t.Run("nil client is reported", func(t *testing.T) {
-		if ok := startCacheCleanup(ctx, nil, time.Minute); ok {
-			t.Error("startCacheCleanup() = true, want false for a nil client")
+		if _, ok := cacheCleanupRunnableFor(nil, time.Minute); ok {
+			t.Error("cacheCleanupRunnableFor() = true, want false for a nil client")
 		}
 	})
+}
+
+func TestCacheCleanupRunnable_Start(t *testing.T) {
+	client := &fakeCachedClient{}
+	runnable, ok := cacheCleanupRunnableFor(client, time.Minute)
+	if !ok {
+		t.Fatal("cacheCleanupRunnableFor() = false, want true for a cached client")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() { done <- runnable.Start(ctx) }()
+
+	// Start must block until the context is cancelled, otherwise the manager
+	// treats the runnable as finished.
+	select {
+	case err := <-done:
+		t.Fatalf("Start() returned before shutdown: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if !client.started {
+		t.Error("StartCleanupLoop was not called")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Start() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start() did not return after the context was cancelled")
+	}
+
+	if !client.stopped {
+		t.Error("cleanup loop did not observe cancellation")
+	}
 }

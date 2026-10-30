@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,10 +34,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
@@ -75,6 +78,15 @@ const (
 	LabelOperatorVersion = "imagecertinfo.security.telco.openshift.io/operator-version"
 )
 
+// DefaultEnrichmentWorkers is the default number of concurrent enrichment
+// workers draining the queue.
+const DefaultEnrichmentWorkers = 4
+
+// maxEnrichmentRetries bounds how often a failed enrichment is retried before
+// it is dropped. Without a cap a permanently broken image (for example an
+// unknown repository) would retry forever.
+const maxEnrichmentRetries = 5
+
 // gradeOrder maps health grades to numeric values for comparison
 var gradeOrder = map[string]int{"A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
 
@@ -102,6 +114,19 @@ type PodReconciler struct {
 	DockerHubClient dockerhub.Client
 	QuayClient      quaylib.RepositoryReader
 	Recorder        record.EventRecorder
+
+	// EnrichQueue feeds the bounded enrichment workers. It is nil when the
+	// reconciler is used outside a manager (for example in tests), in which
+	// case enrichment is skipped.
+	EnrichQueue workqueue.TypedRateLimitingInterface[enrichRequest]
+}
+
+// enrichRequest asks a worker to enrich one ImageCertificationInfo. It holds
+// the image reference so the worker does not have to parse it again. Requests
+// are keyed by CR name, so several pods sharing an image collapse into one.
+type enrichRequest struct {
+	crName string
+	ref    image.Reference
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -280,22 +305,22 @@ func (r *PodReconciler) createImageCertificationInfo(ctx context.Context, ref *i
 		metrics.RecordEvent(corev1.EventTypeNormal, EventReasonImageDiscovered)
 	}
 
-	// If Pyxis client is available and this is a Red Hat registry, check certification
-	if r.PyxisClient != nil && image.IsRedHatRegistry(ref.Registry) {
-		go r.checkPyxisCertification(context.Background(), cr.Name, ref)
-	}
-
-	// If Docker Hub client is available and this is docker.io, enrich with Docker Hub data
-	if r.DockerHubClient != nil && ref.Registry == RegistryDockerHub {
-		go r.checkDockerHubData(context.Background(), cr.Name, ref)
-	}
-
-	// If Quay client is available and this is quay.io, enrich with Quay data
-	if r.QuayClient != nil && ref.Registry == RegistryQuayIO {
-		go r.checkQuayData(context.Background(), cr.Name, ref)
-	}
+	// Enrichment runs on the bounded worker pool instead of a goroutine per
+	// image: on a large cluster a first start would otherwise spawn hundreds of
+	// goroutines that outlive shutdown and are never retried.
+	r.enqueueEnrichment(cr.Name, ref)
 
 	return nil
+}
+
+// enqueueEnrichment hands an image to the enrichment worker pool. With no queue
+// configured (no manager, e.g. a unit test) enrichment is skipped.
+func (r *PodReconciler) enqueueEnrichment(crName string, ref *image.Reference) {
+	if r.EnrichQueue == nil {
+		return
+	}
+
+	r.EnrichQueue.Add(enrichRequest{crName: crName, ref: *ref})
 }
 
 // updatePodReferences updates the pod references in an existing ImageCertificationInfo.
@@ -370,12 +395,13 @@ func (r *PodReconciler) updateCRStatus(
 	})
 }
 
-// checkPyxisCertification queries the Pyxis API for certification data
-func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName string, ref *image.Reference) {
+// checkPyxisCertification queries the Pyxis API for certification data. It
+// returns an error when the lookup should be retried.
+func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName string, ref *image.Reference) error {
 	logger := log.FromContext(ctx).WithValues("crName", crName)
 
 	if r.PyxisClient == nil {
-		return
+		return nil
 	}
 
 	// Query Pyxis
@@ -386,7 +412,7 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		var cr securityv1alpha1.ImageCertificationInfo
 		if getErr := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); getErr != nil {
 			logger.Error(getErr, "failed to get ImageCertificationInfo for Pyxis error update")
-			return
+			return errors.Join(err, getErr)
 		}
 		now := metav1.Now()
 		cr.Status.LastPyxisCheckAt = &now
@@ -398,18 +424,19 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 		clearPyxisStatus(&cr)
 		if updateErr := r.Status().Update(ctx, &cr); updateErr != nil {
 			logger.Error(updateErr, "failed to update status after Pyxis error")
+			return errors.Join(err, updateErr)
 		}
 		if clearErr := r.clearCVEAnnotation(ctx, crName); clearErr != nil {
 			logger.Error(clearErr, "failed to clear CVE annotations after Pyxis error")
 		}
-		return
+		return err
 	}
 
 	// Fetch the latest version of the CR
 	var cr securityv1alpha1.ImageCertificationInfo
 	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
 		logger.Error(err, "failed to get ImageCertificationInfo for Pyxis update")
-		return
+		return err
 	}
 
 	now := metav1.Now()
@@ -451,6 +478,7 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 	// Update status first
 	if err := r.Status().Update(ctx, &cr); err != nil {
 		logger.Error(err, "failed to update ImageCertificationInfo with Pyxis data")
+		return err
 	}
 
 	// Update CVE annotations separately (after status update). An empty CVE list
@@ -462,14 +490,17 @@ func (r *PodReconciler) checkPyxisCertification(ctx context.Context, crName stri
 	} else if updateErr := r.updateCVEAnnotations(ctx, crName, certData.CVEs); updateErr != nil {
 		logger.Error(updateErr, "failed to update CVE annotations")
 	}
+
+	return nil
 }
 
-// checkDockerHubData queries the Docker Hub API for repository metadata
-func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, ref *image.Reference) {
+// checkDockerHubData queries the Docker Hub API for repository metadata. It
+// returns an error when the enrichment should be retried.
+func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, ref *image.Reference) error {
 	logger := log.FromContext(ctx).WithValues("crName", crName)
 
 	if r.DockerHubClient == nil {
-		return
+		return nil
 	}
 
 	// Parse namespace and repository from the repository path
@@ -481,19 +512,19 @@ func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, r
 	repoInfo, err := r.DockerHubClient.GetRepositoryInfo(ctx, namespace, repo)
 	if err != nil {
 		logger.Error(err, "failed to query Docker Hub API")
-		return
+		return err
 	}
 
 	// Fetch the latest version of the CR
 	var cr securityv1alpha1.ImageCertificationInfo
 	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
 		logger.Error(err, "failed to get ImageCertificationInfo for Docker Hub update")
-		return
+		return err
 	}
 
 	if repoInfo == nil {
 		// No data found
-		return
+		return nil
 	}
 
 	// Update CR with Docker Hub data
@@ -502,7 +533,10 @@ func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, r
 	// Update status
 	if err := r.Status().Update(ctx, &cr); err != nil {
 		logger.Error(err, "failed to update ImageCertificationInfo with Docker Hub data")
+		return err
 	}
+
+	return nil
 }
 
 // parseDockerHubRepo parses a repository path into namespace and repository name
@@ -540,12 +574,13 @@ func (r *PodReconciler) updateCRWithDockerHubData(cr *securityv1alpha1.ImageCert
 	}
 }
 
-// checkQuayData queries the Quay.io API for repository metadata
-func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *image.Reference) {
+// checkQuayData queries the Quay.io API for repository metadata. It returns an
+// error when the enrichment should be retried.
+func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *image.Reference) error {
 	logger := log.FromContext(ctx).WithValues("crName", crName)
 
 	if r.QuayClient == nil {
-		return
+		return nil
 	}
 
 	namespace, repo := parseQuayRepo(ref.Repository)
@@ -557,7 +592,7 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 	if err != nil {
 		metrics.RecordQuayRequest("error", "repository", duration)
 		logger.Error(err, "failed to query Quay.io API")
-		return
+		return err
 	}
 
 	metrics.RecordQuayRequest("success", "repository", duration)
@@ -565,7 +600,7 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 	var cr securityv1alpha1.ImageCertificationInfo
 	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
 		logger.Error(err, "failed to get ImageCertificationInfo for Quay update")
-		return
+		return err
 	}
 
 	r.updateCRWithQuayData(&cr, &repoInfo)
@@ -580,7 +615,7 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 
 	if err := r.Status().Update(ctx, &cr); err != nil {
 		logger.Error(err, "failed to update ImageCertificationInfo with Quay data")
-		return
+		return err
 	}
 
 	// Emit vulnerability events and CVE annotations after status update
@@ -601,6 +636,8 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 			logger.Error(updateErr, "failed to update CVE annotations")
 		}
 	}
+
+	return nil
 }
 
 // parseQuayRepo parses a repository path into namespace and repository name
@@ -866,58 +903,155 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 	return nil
 }
 
-// StartCleanupLoop starts a goroutine that periodically cleans up stale pod references
-func (r *PodReconciler) StartCleanupLoop(ctx context.Context, interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+// StartCleanupLoop runs CleanupStaleReferences every interval until ctx is
+// cancelled. It blocks, so it can be registered as a manager Runnable: the
+// manager then starts it only on the leader and cancels it on shutdown.
+func (r *PodReconciler) StartCleanupLoop(ctx context.Context, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := r.CleanupStaleReferences(ctx); err != nil {
-					log.FromContext(ctx).Error(err, "failed to cleanup stale references")
-				}
-			}
-		}
-	}()
-}
-
-// StartRefreshLoop starts a goroutine that periodically refreshes all ImageCertificationInfo resources
-func (r *PodReconciler) StartRefreshLoop(ctx context.Context, interval time.Duration) {
-	go func() {
-		logger := log.FromContext(ctx).WithName("refresh-loop")
-
-		// Random startup delay (0-5 minutes) to avoid thundering herd
-		startupDelay := time.Duration(rand.Int63n(int64(5 * time.Minute))) //nolint:gosec
-		logger.Info("refresh loop starting with delay", "delay", startupDelay)
+	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-time.After(startupDelay):
-		}
-
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// Run immediately after startup delay
-		if err := r.RefreshAllImages(ctx); err != nil {
-			logger.Error(err, "failed to refresh images")
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := r.RefreshAllImages(ctx); err != nil {
-					logger.Error(err, "failed to refresh images")
-				}
+			return nil
+		case <-ticker.C:
+			if err := r.CleanupStaleReferences(ctx); err != nil {
+				log.FromContext(ctx).Error(err, "failed to cleanup stale references")
 			}
 		}
-	}()
+	}
+}
+
+// StartRefreshLoop runs RefreshAllImages every interval until ctx is cancelled.
+// It blocks, so it can be registered as a manager Runnable: the manager then
+// starts it only on the leader and cancels it on shutdown.
+func (r *PodReconciler) StartRefreshLoop(ctx context.Context, interval time.Duration) error {
+	logger := log.FromContext(ctx).WithName("refresh-loop")
+
+	// Random startup delay (0-5 minutes) to avoid thundering herd
+	startupDelay := time.Duration(rand.Int63n(int64(5 * time.Minute))) //nolint:gosec
+	logger.Info("refresh loop starting with delay", "delay", startupDelay)
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(startupDelay):
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Run immediately after startup delay
+	if err := r.RefreshAllImages(ctx); err != nil {
+		logger.Error(err, "failed to refresh images")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := r.RefreshAllImages(ctx); err != nil {
+				logger.Error(err, "failed to refresh images")
+			}
+		}
+	}
+}
+
+// SetupEnrichmentWorkers creates the enrichment queue and registers the worker
+// pool with the manager. As a plain Runnable the pool runs only on the leader,
+// which matches the controller that feeds it.
+func (r *PodReconciler) SetupEnrichmentWorkers(mgr ctrl.Manager, workers int) error {
+	if workers <= 0 {
+		workers = DefaultEnrichmentWorkers
+	}
+	r.EnrichQueue = newEnrichQueue()
+
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		r.runEnrichmentWorkers(ctx, workers)
+
+		return nil
+	}))
+}
+
+// newEnrichQueue builds the work queue shared by the enrichment workers.
+func newEnrichQueue() workqueue.TypedRateLimitingInterface[enrichRequest] {
+	return workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[enrichRequest]())
+}
+
+// runEnrichmentWorkers drains the enrichment queue with the given number of
+// workers until ctx is cancelled. It returns after every worker has exited.
+func (r *PodReconciler) runEnrichmentWorkers(ctx context.Context, workers int) {
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Go(func() {
+			r.enrichmentWorker(ctx)
+		})
+	}
+
+	<-ctx.Done()
+	// ShutDown wakes blocked workers; without it Get would block forever and
+	// the manager would wait out its shutdown timeout.
+	r.EnrichQueue.ShutDown()
+	wg.Wait()
+}
+
+// enrichmentWorker processes requests until the queue is shut down.
+func (r *PodReconciler) enrichmentWorker(ctx context.Context) {
+	for {
+		item, shutdown := r.EnrichQueue.Get()
+		if shutdown {
+			return
+		}
+
+		r.processEnrichRequest(ctx, item)
+		r.EnrichQueue.Done(item)
+	}
+}
+
+// processEnrichRequest enriches one image once and decides whether to retry it.
+// Retries use the queue's exponential backoff so a transient API failure is
+// retried within seconds instead of waiting for the 24h refresh cycle.
+func (r *PodReconciler) processEnrichRequest(ctx context.Context, item enrichRequest) {
+	err := r.enrich(ctx, item)
+	if err == nil {
+		r.EnrichQueue.Forget(item)
+
+		return
+	}
+
+	logger := log.FromContext(ctx).WithValues("crName", item.crName)
+
+	// Do not requeue work the manager cancelled; the queue is shutting down.
+	if ctx.Err() != nil {
+		r.EnrichQueue.Forget(item)
+
+		return
+	}
+
+	if requeues := r.EnrichQueue.NumRequeues(item); requeues >= maxEnrichmentRetries {
+		logger.Error(err, "giving up on image enrichment after retries", "requeues", requeues)
+		r.EnrichQueue.Forget(item)
+
+		return
+	}
+
+	logger.Error(err, "image enrichment failed, retrying with backoff")
+	r.EnrichQueue.AddRateLimited(item)
+}
+
+// enrich dispatches a request to the client that serves the image's registry.
+func (r *PodReconciler) enrich(ctx context.Context, item enrichRequest) error {
+	switch {
+	case r.PyxisClient != nil && image.IsRedHatRegistry(item.ref.Registry):
+		return r.checkPyxisCertification(ctx, item.crName, &item.ref)
+	case r.DockerHubClient != nil && item.ref.Registry == RegistryDockerHub:
+		return r.checkDockerHubData(ctx, item.crName, &item.ref)
+	case r.QuayClient != nil && item.ref.Registry == RegistryQuayIO:
+		return r.checkQuayData(ctx, item.crName, &item.ref)
+	default:
+		return nil
+	}
 }
 
 // RefreshAllImages refreshes certification data for all Red Hat registry images
