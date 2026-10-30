@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -507,7 +508,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 			ImageDigest:        "sha256:def67890def67890def67890def67890def67890def67890def67890def67890",
 			FullImageReference: "docker.io/library/nginx@sha256:def67890",
 			Registry:           "docker.io",
-			Repository:         "library/nginx",
+			Repository:         testDockerHubRepository,
 		},
 		Status: securityv1alpha1.ImageCertificationInfoStatus{
 			RegistryType:        securityv1alpha1.RegistryTypeCommunity,
@@ -766,7 +767,7 @@ func TestBuildCVEAnnotation(t *testing.T) {
 	}
 
 	// A short list is written verbatim with no sentinel.
-	small := []string{testCVE, "CVE-2026-0002"}
+	small := []string{testCVE, testCVEHigh}
 	value, truncated := buildCVEAnnotation(small)
 	if truncated {
 		t.Error("short list must not be truncated")
@@ -807,7 +808,7 @@ func TestUpdateCVEAnnotations_SkipsUnchangedValue(t *testing.T) {
 		t.Errorf("patches = %d, want 0 for an unchanged list", patches)
 	}
 
-	if err := reconciler.updateCVEAnnotations(ctx, name, []string{"CVE-2026-0002"}); err != nil {
+	if err := reconciler.updateCVEAnnotations(ctx, name, []string{testCVEHigh}); err != nil {
 		t.Fatalf("updateCVEAnnotations() error = %v", err)
 	}
 	if patches != 1 {
@@ -1118,11 +1119,19 @@ func (s *stubDockerHubClient) GetRepositoryInfo(
 
 func (s *stubDockerHubClient) IsHealthy(ctx context.Context) bool { return true }
 
-// stubQuayClient implements quaylib.RepositoryReader for dispatch tests.
+// stubQuayClient implements quaylib.RepositoryReader for dispatch and
+// enrichment tests. Each call can be given its own result or error.
 type stubQuayClient struct {
-	repo   quaylib.RepositoryWithTags
-	err    error
-	called bool
+	repo        quaylib.RepositoryWithTags
+	err         error
+	scan        *quaylib.SecurityScan
+	scanErr     error
+	manifest    *quaylib.Manifest
+	manifestErr error
+	labels      *quaylib.ManifestLabels
+	labelsErr   error
+	called      bool
+	scanCalled  bool
 }
 
 func (s *stubQuayClient) GetRepository(
@@ -1148,19 +1157,21 @@ func (s *stubQuayClient) ListAllTags(
 func (s *stubQuayClient) GetManifestSecurity(
 	ctx context.Context, namespace, repository, manifestRef string, vulnerabilities bool,
 ) (*quaylib.SecurityScan, error) {
-	return nil, nil
+	s.scanCalled = true
+
+	return s.scan, s.scanErr
 }
 
 func (s *stubQuayClient) GetManifest(
 	ctx context.Context, namespace, repository, manifestRef string,
 ) (*quaylib.Manifest, error) {
-	return nil, nil
+	return s.manifest, s.manifestErr
 }
 
 func (s *stubQuayClient) GetManifestLabels(
 	ctx context.Context, namespace, repository, manifestRef string,
 ) (*quaylib.ManifestLabels, error) {
-	return nil, nil
+	return s.labels, s.labelsErr
 }
 
 // newDispatchTestClient returns a fake client holding one CR for the given
@@ -1194,13 +1205,13 @@ func TestPodReconciler_EnrichDispatchesByRegistry(t *testing.T) {
 	t.Run("docker.io uses the Docker Hub client", func(t *testing.T) {
 		dockerHub := &stubDockerHubClient{info: &dockerhub.RepositoryInfo{IsOfficial: true}}
 		reconciler := &PodReconciler{
-			Client:          newDispatchTestClient(t, "docker.io.library.nginx", RegistryDockerHub, "library/nginx"),
+			Client:          newDispatchTestClient(t, "docker.io.library.nginx", RegistryDockerHub, testDockerHubRepository),
 			DockerHubClient: dockerHub,
 		}
 
 		item := enrichRequest{
 			crName: "docker.io.library.nginx",
-			ref:    image.Reference{Registry: RegistryDockerHub, Repository: "library/nginx", Digest: testDigest},
+			ref:    image.Reference{Registry: RegistryDockerHub, Repository: testDockerHubRepository, Digest: testDigest},
 		}
 		if err := reconciler.enrich(ctx, item); err != nil {
 			t.Fatalf("enrich() error = %v", err)
@@ -1356,7 +1367,7 @@ func staleCertifiedCR() *securityv1alpha1.ImageCertificationInfo {
 	days := 30
 	meta := metav1.ObjectMeta{
 		Name:        testCRName,
-		Annotations: map[string]string{AnnotationCVEs: "CVE-2026-0001,CVE-2026-0002"},
+		Annotations: map[string]string{AnnotationCVEs: testCVEAnnotationValue},
 	}
 	return &securityv1alpha1.ImageCertificationInfo{
 		ObjectMeta: meta,
@@ -1829,5 +1840,938 @@ func TestPodReconciler_Reconcile_WithEnvtest(t *testing.T) {
 	}
 	if cr.Status.LastSeenAt == nil {
 		t.Error("LastSeenAt = nil, want the status written by Reconcile")
+	}
+}
+
+// testDockerHubRepository is the docker.io repository path used by the fixtures
+// below.
+const testDockerHubRepository = "library/nginx"
+
+// testDockerHubCRName is the CR name for the docker.io fixture below.
+const testDockerHubCRName = "docker.io.library.nginx.abc123de"
+
+// staleDockerHubCR returns a docker.io CR carrying a Docker Hub payload and an
+// Official certification status left over from an earlier cycle.
+func staleDockerHubCR() *securityv1alpha1.ImageCertificationInfo {
+	now := metav1.Now()
+	days := 12
+	meta := metav1.ObjectMeta{Name: testDockerHubCRName}
+
+	return &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: meta,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "docker.io/library/nginx@" + testDigest,
+			Registry:           RegistryDockerHub,
+			Repository:         testDockerHubRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeCommunity,
+			CertificationStatus: securityv1alpha1.CertificationStatusOfficial,
+			DockerHubData: &securityv1alpha1.DockerHubData{
+				IsOfficialImage:    true,
+				PullCount:          1_000_000,
+				LastUpdated:        &now,
+				DaysSinceUpdate:    &days,
+				PullCountFormatted: "1M",
+			},
+		},
+	}
+}
+
+func TestClearDockerHubStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		in   securityv1alpha1.CertificationStatus
+		want securityv1alpha1.CertificationStatus
+	}{
+		{"official", securityv1alpha1.CertificationStatusOfficial, securityv1alpha1.CertificationStatusUnknown},
+		{"verified", securityv1alpha1.CertificationStatusVerified, securityv1alpha1.CertificationStatusUnknown},
+		{"not certified", securityv1alpha1.CertificationStatusNotCertified, securityv1alpha1.CertificationStatusUnknown},
+		{"certified untouched", securityv1alpha1.CertificationStatusCertified, securityv1alpha1.CertificationStatusCertified},
+		{"error untouched", securityv1alpha1.CertificationStatusError, securityv1alpha1.CertificationStatusError},
+		{"unknown untouched", securityv1alpha1.CertificationStatusUnknown, securityv1alpha1.CertificationStatusUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := staleDockerHubCR()
+			cr.Status.CertificationStatus = tt.in
+
+			clearDockerHubStatus(cr)
+
+			if cr.Status.DockerHubData != nil {
+				t.Errorf("DockerHubData = %+v, want nil", cr.Status.DockerHubData)
+			}
+			if cr.Status.CertificationStatus != tt.want {
+				t.Errorf("CertificationStatus = %v, want %v", cr.Status.CertificationStatus, tt.want)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_CheckDockerHubData_NotFoundClearsStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleDockerHubCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:          fakeClient,
+		Scheme:          scheme,
+		DockerHubClient: &stubDockerHubClient{info: nil},
+	}
+
+	ref := &image.Reference{Registry: RegistryDockerHub, Repository: testDockerHubRepository, Digest: testDigest}
+	if err := reconciler.checkDockerHubData(ctx, testDockerHubCRName, ref); err != nil {
+		t.Fatalf("checkDockerHubData() error = %v, want nil for a missing repository", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testDockerHubCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	if updatedCR.Status.DockerHubData != nil {
+		t.Errorf("DockerHubData = %+v, want nil", updatedCR.Status.DockerHubData)
+	}
+	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusUnknown {
+		t.Errorf("CertificationStatus = %v, want Unknown", updatedCR.Status.CertificationStatus)
+	}
+}
+
+func TestPodReconciler_CheckDockerHubData_ErrorPreservesStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleDockerHubCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	apiErr := errors.New("docker hub unavailable")
+	reconciler := &PodReconciler{
+		Client:          fakeClient,
+		Scheme:          scheme,
+		DockerHubClient: &stubDockerHubClient{err: apiErr},
+	}
+
+	ref := &image.Reference{Registry: RegistryDockerHub, Repository: testDockerHubRepository, Digest: testDigest}
+	if err := reconciler.checkDockerHubData(ctx, testDockerHubCRName, ref); !errors.Is(err, apiErr) {
+		t.Fatalf("checkDockerHubData() error = %v, want %v", err, apiErr)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testDockerHubCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	// A transient failure must not blank good data: the enrichment worker retries.
+	if updatedCR.Status.DockerHubData == nil {
+		t.Fatal("DockerHubData = nil, want the previous payload preserved")
+	}
+	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusOfficial {
+		t.Errorf("CertificationStatus = %v, want Official", updatedCR.Status.CertificationStatus)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_DockerHubNotFoundClearsStatus(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleDockerHubCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:          fakeClient,
+		Scheme:          scheme,
+		DockerHubClient: &stubDockerHubClient{info: nil},
+	}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testDockerHubCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	if updatedCR.Status.DockerHubData != nil {
+		t.Errorf("DockerHubData = %+v, want nil", updatedCR.Status.DockerHubData)
+	}
+	if updatedCR.Status.CertificationStatus != securityv1alpha1.CertificationStatusUnknown {
+		t.Errorf("CertificationStatus = %v, want Unknown", updatedCR.Status.CertificationStatus)
+	}
+}
+
+const (
+	testQuayCRName     = "quay.io.redhat.ubi9.abc123de"
+	testQuayRepository = "redhat/ubi9"
+	testQuayScanStatus = "scanned"
+	testQuayVendor     = "Red Hat"
+
+	// testCVEAnnotationValue is the CVE list the fixtures carry in the
+	// security.telco.openshift.io/cves annotation.
+	testCVEAnnotationValue = "CVE-2026-0001,CVE-2026-0002"
+	// testCVEHigh is a High-severity CVE used by the Quay scan fixtures.
+	testCVEHigh = "CVE-2026-0002"
+)
+
+// staleQuayCR returns a quay.io CR whose status carries enrichment data from an
+// earlier cycle, including an annotation that a clean scan should remove.
+func staleQuayCR() *securityv1alpha1.ImageCertificationInfo {
+	now := metav1.Now()
+	days := 40
+	meta := metav1.ObjectMeta{
+		Name:        testQuayCRName,
+		Annotations: map[string]string{AnnotationCVEs: testCVEAnnotationValue},
+	}
+
+	return &securityv1alpha1.ImageCertificationInfo{
+		ObjectMeta: meta,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "quay.io/" + testQuayRepository + "@" + testDigest,
+			Registry:           RegistryQuayIO,
+			Repository:         testQuayRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeCommunity,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			QuayData: &securityv1alpha1.QuayData{
+				IsPublic:               true,
+				State:                  "NORMAL",
+				Description:            "old description",
+				TagCount:               3,
+				LastModified:           &now,
+				DaysSinceUpdate:        &days,
+				SecurityScanStatus:     testQuayScanStatus,
+				Vulnerabilities:        &securityv1alpha1.VulnerabilitySummary{Critical: 2, Important: 3},
+				TotalVulnerabilities:   5,
+				FixableVulnerabilities: 4,
+				Vendor:                 testQuayVendor,
+				Architecture:           "amd64",
+				BuildDate:              "2026-01-01",
+				LicenseURL:             "https://example.com/license",
+				VCSRef:                 "abcdef",
+				LayerCount:             7,
+				CompressedSizeBytes:    1234,
+				IsManifestList:         true,
+			},
+		},
+	}
+}
+
+// assertQuayStaleFieldsCleared checks that no Quay-derived value survived a
+// successful enrichment that carried no data.
+func assertQuayStaleFieldsCleared(t *testing.T, quayData *securityv1alpha1.QuayData) {
+	t.Helper()
+
+	if quayData == nil {
+		t.Fatal("QuayData = nil, want it present")
+	}
+	if quayData.LastModified != nil {
+		t.Errorf("LastModified = %v, want nil", quayData.LastModified)
+	}
+	if quayData.DaysSinceUpdate != nil {
+		t.Errorf("DaysSinceUpdate = %d, want nil", *quayData.DaysSinceUpdate)
+	}
+	if quayData.TagCount != 0 {
+		t.Errorf("TagCount = %d, want 0", quayData.TagCount)
+	}
+	if quayData.State != "" {
+		t.Errorf("State = %q, want empty", quayData.State)
+	}
+	if quayData.Description != "" {
+		t.Errorf("Description = %q, want empty", quayData.Description)
+	}
+	if quayData.SecurityScanStatus != "" {
+		t.Errorf("SecurityScanStatus = %q, want empty", quayData.SecurityScanStatus)
+	}
+	if quayData.Vulnerabilities != nil {
+		t.Errorf("Vulnerabilities = %+v, want nil", quayData.Vulnerabilities)
+	}
+	if quayData.TotalVulnerabilities != 0 {
+		t.Errorf("TotalVulnerabilities = %d, want 0", quayData.TotalVulnerabilities)
+	}
+	if quayData.FixableVulnerabilities != 0 {
+		t.Errorf("FixableVulnerabilities = %d, want 0", quayData.FixableVulnerabilities)
+	}
+	if quayData.LayerCount != 0 {
+		t.Errorf("LayerCount = %d, want 0", quayData.LayerCount)
+	}
+	if quayData.CompressedSizeBytes != 0 {
+		t.Errorf("CompressedSizeBytes = %d, want 0", quayData.CompressedSizeBytes)
+	}
+	if quayData.IsManifestList {
+		t.Error("IsManifestList = true, want false")
+	}
+
+	labels := map[string]string{
+		"Vendor":       quayData.Vendor,
+		"Architecture": quayData.Architecture,
+		"BuildDate":    quayData.BuildDate,
+		"LicenseURL":   quayData.LicenseURL,
+		"VCSRef":       quayData.VCSRef,
+	}
+	for name, value := range labels {
+		if value != "" {
+			t.Errorf("%s = %q, want empty", name, value)
+		}
+	}
+}
+
+func TestPodReconciler_UpdateCRWithQuayData_ClearsTimestampsWhenAbsent(t *testing.T) {
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{}
+
+	reconciler.updateCRWithQuayData(cr, &quaylib.RepositoryWithTags{})
+
+	quayData := cr.Status.QuayData
+	if quayData.LastModified != nil {
+		t.Errorf("LastModified = %v, want nil when the API reports no tag", quayData.LastModified)
+	}
+	if quayData.DaysSinceUpdate != nil {
+		t.Errorf("DaysSinceUpdate = %d, want nil when the API reports no tag", *quayData.DaysSinceUpdate)
+	}
+	if quayData.TagCount != 0 {
+		t.Errorf("TagCount = %d, want 0", quayData.TagCount)
+	}
+	if quayData.State != "" || quayData.Description != "" {
+		t.Errorf("State/Description = %q/%q, want empty", quayData.State, quayData.Description)
+	}
+}
+
+func TestPodReconciler_UpdateCRWithQuayData_PreservesEnrichmentFields(t *testing.T) {
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{}
+
+	reconciler.updateCRWithQuayData(cr, &quaylib.RepositoryWithTags{})
+
+	// The helpers own these fields; this function must not blank them, or a
+	// failed scan would erase a good summary.
+	quayData := cr.Status.QuayData
+	if quayData.SecurityScanStatus != testQuayScanStatus {
+		t.Errorf("SecurityScanStatus = %q, want scanned", quayData.SecurityScanStatus)
+	}
+	if quayData.Vulnerabilities == nil || quayData.Vulnerabilities.Critical != 2 {
+		t.Errorf("Vulnerabilities = %+v, want Critical 2 preserved", quayData.Vulnerabilities)
+	}
+	if quayData.LayerCount != 7 {
+		t.Errorf("LayerCount = %d, want 7 preserved", quayData.LayerCount)
+	}
+	if quayData.Vendor != testQuayVendor {
+		t.Errorf("Vendor = %q, want preserved", quayData.Vendor)
+	}
+}
+
+func TestPodReconciler_EnrichQuaySecurity_SuccessNoDataClearsCounts(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{scan: &quaylib.SecurityScan{Status: "queued"}}}
+
+	cves, ok := reconciler.enrichQuaySecurity(ctx, cr, "redhat", "ubi9", testDigest)
+
+	if !ok {
+		t.Fatal("ok = false, want true for a successful request")
+	}
+	if len(cves) != 0 {
+		t.Errorf("cves = %v, want empty", cves)
+	}
+
+	quayData := cr.Status.QuayData
+	if quayData.SecurityScanStatus != "queued" {
+		t.Errorf("SecurityScanStatus = %q, want queued", quayData.SecurityScanStatus)
+	}
+	if quayData.Vulnerabilities != nil {
+		t.Errorf("Vulnerabilities = %+v, want nil", quayData.Vulnerabilities)
+	}
+	if quayData.TotalVulnerabilities != 0 || quayData.FixableVulnerabilities != 0 {
+		t.Errorf("Total/Fixable = %d/%d, want 0/0",
+			quayData.TotalVulnerabilities, quayData.FixableVulnerabilities)
+	}
+}
+
+func TestPodReconciler_EnrichQuaySecurity_ErrorPreservesCounts(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{scanErr: errors.New("clair unavailable")}}
+
+	_, ok := reconciler.enrichQuaySecurity(ctx, cr, "redhat", "ubi9", testDigest)
+
+	if ok {
+		t.Fatal("ok = true, want false for a failed request")
+	}
+
+	quayData := cr.Status.QuayData
+	if quayData.Vulnerabilities == nil || quayData.Vulnerabilities.Critical != 2 {
+		t.Errorf("Vulnerabilities = %+v, want the previous summary preserved", quayData.Vulnerabilities)
+	}
+	if quayData.SecurityScanStatus != testQuayScanStatus {
+		t.Errorf("SecurityScanStatus = %q, want scanned preserved", quayData.SecurityScanStatus)
+	}
+}
+
+func TestPodReconciler_EnrichQuayManifest_SuccessNilClearsFields(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{}}
+
+	if ok := reconciler.enrichQuayManifest(ctx, cr, "redhat", "ubi9", testDigest); !ok {
+		t.Fatal("ok = false, want true")
+	}
+
+	quayData := cr.Status.QuayData
+	if quayData.LayerCount != 0 || quayData.CompressedSizeBytes != 0 || quayData.IsManifestList {
+		t.Errorf("manifest fields = %d/%d/%v, want zeroed",
+			quayData.LayerCount, quayData.CompressedSizeBytes, quayData.IsManifestList)
+	}
+}
+
+func TestPodReconciler_EnrichQuayManifest_ErrorPreservesFields(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{manifestErr: errors.New("boom")}}
+
+	if ok := reconciler.enrichQuayManifest(ctx, cr, "redhat", "ubi9", testDigest); ok {
+		t.Fatal("ok = true, want false")
+	}
+	if cr.Status.QuayData.LayerCount != 7 {
+		t.Errorf("LayerCount = %d, want 7 preserved", cr.Status.QuayData.LayerCount)
+	}
+}
+
+func TestPodReconciler_EnrichQuayLabels_SuccessResetsDroppedLabels(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{
+		labels: &quaylib.ManifestLabels{
+			Labels: []quaylib.ManifestLabel{{Key: "vendor", Value: "Red Hat, Inc."}},
+		},
+	}}
+
+	if ok := reconciler.enrichQuayLabels(ctx, cr, "redhat", "ubi9", testDigest); !ok {
+		t.Fatal("ok = false, want true")
+	}
+
+	quayData := cr.Status.QuayData
+	if quayData.Vendor != "Red Hat, Inc." {
+		t.Errorf("Vendor = %q, want the label value", quayData.Vendor)
+	}
+	if quayData.Architecture != "" || quayData.BuildDate != "" || quayData.LicenseURL != "" || quayData.VCSRef != "" {
+		t.Errorf("dropped labels survived: %q/%q/%q/%q",
+			quayData.Architecture, quayData.BuildDate, quayData.LicenseURL, quayData.VCSRef)
+	}
+}
+
+func TestPodReconciler_EnrichQuayLabels_ErrorPreservesLabels(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{labelsErr: errors.New("boom")}}
+
+	if ok := reconciler.enrichQuayLabels(ctx, cr, "redhat", "ubi9", testDigest); ok {
+		t.Fatal("ok = true, want false")
+	}
+	if cr.Status.QuayData.Vendor != testQuayVendor {
+		t.Errorf("Vendor = %q, want Red Hat preserved", cr.Status.QuayData.Vendor)
+	}
+}
+
+func TestPodReconciler_CheckQuayData_EmptyRepositoryResponseClearsRepoFields(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, QuayClient: &stubQuayClient{}}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err != nil {
+		t.Fatalf("checkQuayData() error = %v", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testQuayCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	assertQuayStaleFieldsCleared(t, updatedCR.Status.QuayData)
+}
+
+func TestPodReconciler_RefreshSingleImage_QuayEmptyRepositoryResponseClearsRepoFields(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, QuayClient: &stubQuayClient{}}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testQuayCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	assertQuayStaleFieldsCleared(t, updatedCR.Status.QuayData)
+}
+
+func TestPodReconciler_CheckQuayData_SecurityErrorPreservesPreviousSummary(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{scanErr: errors.New("clair unavailable")},
+	}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err == nil {
+		t.Fatal("checkQuayData() error = nil, want a retryable error")
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testQuayCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	quayData := updatedCR.Status.QuayData
+	if quayData == nil || quayData.Vulnerabilities == nil {
+		t.Fatal("Vulnerabilities = nil, want the previous summary preserved")
+	}
+	if quayData.Vulnerabilities.Critical != 2 || quayData.TotalVulnerabilities != 5 {
+		t.Errorf("Vulnerabilities = %+v total %d, want Critical 2 total 5",
+			quayData.Vulnerabilities, quayData.TotalVulnerabilities)
+	}
+}
+
+// quayScanWith builds a successful Clair scan result carrying the given
+// severities, in order.
+func quayScanWith(vulns ...quaylib.SecurityVulnerability) *quaylib.SecurityScan {
+	return &quaylib.SecurityScan{
+		Status: testQuayScanStatus,
+		Data: &quaylib.SecurityData{
+			Layer: &quaylib.SecurityLayer{
+				Features: []quaylib.SecurityFeature{{Vulnerabilities: vulns}},
+			},
+		},
+	}
+}
+
+// cveAnnotation returns the stored CVE annotation and whether it is present.
+func cveAnnotation(t *testing.T, c client.Client) (string, bool) {
+	t.Helper()
+
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := c.Get(context.Background(), client.ObjectKey{Name: testQuayCRName}, &cr); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	value, ok := cr.Annotations[AnnotationCVEs]
+
+	return value, ok
+}
+
+func TestPodReconciler_EnrichQuaySecurity_IncludesHighCVEs(t *testing.T) {
+	ctx := context.Background()
+	cr := staleQuayCR()
+	reconciler := &PodReconciler{QuayClient: &stubQuayClient{scan: quayScanWith(
+		quaylib.SecurityVulnerability{Name: "CVE-2026-0001", Severity: "Critical"},
+		quaylib.SecurityVulnerability{Name: testCVEHigh, Severity: "High"},
+	)}}
+
+	cves, ok := reconciler.enrichQuaySecurity(ctx, cr, "redhat", "ubi9", testDigest)
+
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if len(cves) != 2 || cves[0] != "CVE-2026-0001" || cves[1] != testCVEHigh {
+		t.Errorf("cves = %v, want both the Critical and the High CVE", cves)
+	}
+
+	vulns := cr.Status.QuayData.Vulnerabilities
+	if vulns == nil || vulns.Critical != 1 || vulns.Important != 1 {
+		t.Errorf("Vulnerabilities = %+v, want Critical 1 Important 1", vulns)
+	}
+}
+
+func TestPodReconciler_CheckQuayData_CleanScanClearsCVEAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	// A successful scan that reports no vulnerabilities at all.
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{scan: &quaylib.SecurityScan{Status: testQuayScanStatus}},
+	}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err != nil {
+		t.Fatalf("checkQuayData() error = %v", err)
+	}
+
+	if value, ok := cveAnnotation(t, fakeClient); ok {
+		t.Errorf("annotation %s = %q, want removed", AnnotationCVEs, value)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_QuayCleanScanClearsCVEAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{scan: &quaylib.SecurityScan{Status: testQuayScanStatus}},
+	}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	if value, ok := cveAnnotation(t, fakeClient); ok {
+		t.Errorf("annotation %s = %q, want removed", AnnotationCVEs, value)
+	}
+}
+
+func TestPodReconciler_CheckQuayData_HighCVEsWrittenToAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		QuayClient: &stubQuayClient{scan: quayScanWith(
+			quaylib.SecurityVulnerability{Name: testCVEHigh, Severity: "High"},
+		)},
+	}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err != nil {
+		t.Fatalf("checkQuayData() error = %v", err)
+	}
+
+	value, ok := cveAnnotation(t, fakeClient)
+	if !ok {
+		t.Fatalf("annotation %s missing, want it to name the High CVE", AnnotationCVEs)
+	}
+	if value != testCVEHigh {
+		t.Errorf("annotation = %q, want CVE-2026-0002", value)
+	}
+}
+
+func TestPodReconciler_CheckQuayData_ScanErrorLeavesAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{scanErr: errors.New("clair unavailable")},
+	}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err == nil {
+		t.Fatal("checkQuayData() error = nil, want a retryable error")
+	}
+
+	value, ok := cveAnnotation(t, fakeClient)
+	if !ok {
+		t.Fatal("annotation removed, want it preserved across a failed scan")
+	}
+	if value != testCVEAnnotationValue {
+		t.Errorf("annotation = %q, want the previous list", value)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_QuayScanErrorLeavesAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{scanErr: errors.New("clair unavailable")},
+	}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err == nil {
+		t.Fatal("refreshSingleImage() error = nil, want the enrichment failure reported")
+	}
+
+	value, ok := cveAnnotation(t, fakeClient)
+	if !ok {
+		t.Fatal("annotation removed, want it preserved across a failed scan")
+	}
+	if value != testCVEAnnotationValue {
+		t.Errorf("annotation = %q, want the previous list", value)
+	}
+}
+
+func TestPodReconciler_CheckQuayData_EmptyDigestLeavesAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	quayClient := &stubQuayClient{scan: &quaylib.SecurityScan{Status: testQuayScanStatus}}
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, QuayClient: quayClient}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository}
+	if err := reconciler.checkQuayData(ctx, testQuayCRName, ref); err != nil {
+		t.Fatalf("checkQuayData() error = %v", err)
+	}
+
+	if quayClient.scanCalled {
+		t.Error("GetManifestSecurity was called without a digest")
+	}
+	if value, ok := cveAnnotation(t, fakeClient); !ok {
+		t.Error("annotation removed, want it left alone when no scan is attempted")
+	} else if value != testCVEAnnotationValue {
+		t.Errorf("annotation = %q, want the previous list", value)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_QuayEmptyDigestLeavesAnnotation(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+	cr.Spec.ImageDigest = ""
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	quayClient := &stubQuayClient{scan: &quaylib.SecurityScan{Status: testQuayScanStatus}}
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, QuayClient: quayClient}
+
+	if err := reconciler.refreshSingleImage(ctx, cr); err != nil {
+		t.Fatalf("refreshSingleImage() error = %v", err)
+	}
+
+	if quayClient.scanCalled {
+		t.Error("GetManifestSecurity was called without a digest")
+	}
+	if value, ok := cveAnnotation(t, fakeClient); !ok {
+		t.Error("annotation removed, want it left alone when no scan is attempted")
+	} else if value != testCVEAnnotationValue {
+		t.Errorf("annotation = %q, want the previous list", value)
+	}
+}
+
+// quayDeniedError builds the authorization error Quay returns for repositories
+// the token may not see.
+func quayDeniedError() error {
+	return &quaylib.QuayError{Status: http.StatusUnauthorized, Message: "Requires authentication"}
+}
+
+func TestPodReconciler_CheckQuayData_UnauthorizedKeepsPreviousEnrichment(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{err: quayDeniedError()},
+	}
+
+	ref := &image.Reference{Registry: RegistryQuayIO, Repository: testQuayRepository, Digest: testDigest}
+	err := reconciler.checkQuayData(ctx, testQuayCRName, ref)
+	if err == nil {
+		t.Fatal("checkQuayData() error = nil, want the authorization failure reported")
+	}
+
+	if _, ok := errors.AsType[*permanentError](err); !ok {
+		t.Errorf("error = %T, want a permanent failure so the worker stops retrying", err)
+	}
+	if !isQuayDenied(err) {
+		t.Errorf("isQuayDenied() = false for %v", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testQuayCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	// A 401 is not proof of a deleted repository, so nothing may be cleared.
+	quayData := updatedCR.Status.QuayData
+	if quayData == nil || quayData.Vulnerabilities == nil || quayData.Vulnerabilities.Critical != 2 {
+		t.Errorf("Vulnerabilities = %+v, want the previous summary preserved", quayData)
+	}
+	if quayData.LastModified == nil {
+		t.Error("LastModified = nil, want the previous value preserved")
+	}
+	if value, ok := cveAnnotation(t, fakeClient); !ok || value != testCVEAnnotationValue {
+		t.Errorf("annotation = %q/%v, want %q preserved", value, ok, testCVEAnnotationValue)
+	}
+}
+
+func TestPodReconciler_RefreshSingleImage_QuayUnauthorizedKeepsPreviousEnrichment(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client:     fakeClient,
+		Scheme:     scheme,
+		QuayClient: &stubQuayClient{err: quayDeniedError()},
+	}
+
+	err := reconciler.refreshSingleImage(ctx, cr)
+
+	if _, ok := errors.AsType[*permanentError](err); !ok {
+		t.Fatalf("refreshSingleImage() error = %v, want a permanent failure", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testQuayCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	if updatedCR.Status.QuayData == nil || updatedCR.Status.QuayData.Vulnerabilities == nil {
+		t.Fatal("Vulnerabilities = nil, want the previous summary preserved")
+	}
+	if updatedCR.Status.QuayData.Vulnerabilities.Critical != 2 {
+		t.Errorf("Critical = %d, want 2 preserved", updatedCR.Status.QuayData.Vulnerabilities.Critical)
+	}
+}
+
+// newQuayEnrichmentReconciler returns a reconciler whose queue feeds a single
+// quay.io CR.
+func newQuayEnrichmentReconciler(t *testing.T, quayClient quaylib.RepositoryReader) *PodReconciler {
+	t.Helper()
+
+	scheme := newTestScheme()
+	cr := staleQuayCR()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, QuayClient: quayClient}
+	reconciler.EnrichQueue = newEnrichQueue()
+
+	return reconciler
+}
+
+func TestProcessEnrichRequest_PermanentFailureIsNotRequeued(t *testing.T) {
+	item := enrichRequest{
+		crName: testQuayCRName,
+		ref: image.Reference{
+			Registry:   RegistryQuayIO,
+			Repository: testQuayRepository,
+			Digest:     testDigest,
+		},
+	}
+
+	tests := []struct {
+		name         string
+		err          error
+		wantRequeues int
+	}{
+		{"authorization denial is not retried", quayDeniedError(), 0},
+		{"transient failure is retried", errors.New("quay unavailable"), 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := newQuayEnrichmentReconciler(t, &stubQuayClient{err: tt.err})
+			defer reconciler.EnrichQueue.ShutDown()
+
+			reconciler.processEnrichRequest(context.Background(), item)
+
+			if got := reconciler.EnrichQueue.NumRequeues(item); got != tt.wantRequeues {
+				t.Errorf("NumRequeues() = %d, want %d", got, tt.wantRequeues)
+			}
+		})
 	}
 }
