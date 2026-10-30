@@ -523,12 +523,13 @@ func (r *PodReconciler) checkDockerHubData(ctx context.Context, crName string, r
 	}
 
 	if repoInfo == nil {
-		// No data found
-		return nil
+		// The repository is gone: deleted, renamed, or made private. Drop the
+		// payload from the previous cycle, otherwise the CR keeps advertising an
+		// Official or Verified badge that Docker Hub no longer confirms.
+		clearDockerHubStatus(&cr)
+	} else {
+		r.updateCRWithDockerHubData(&cr, repoInfo)
 	}
-
-	// Update CR with Docker Hub data
-	r.updateCRWithDockerHubData(&cr, repoInfo)
 
 	// Update status
 	if err := r.Status().Update(ctx, &cr); err != nil {
@@ -590,6 +591,15 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 	duration := time.Since(start).Seconds()
 
 	if err != nil {
+		if isQuayDenied(err) {
+			// Quay answers 401/403 for repositories the token may not see, which
+			// includes repositories that are gone, so this is not proof of a
+			// deletion: keep the previous enrichment instead of blanking it.
+			metrics.RecordQuayRequest("denied", "repository", duration)
+			logger.Info("Quay denied access to the repository; keeping the previous enrichment", "error", err)
+
+			return classifyQuayError(err)
+		}
 		metrics.RecordQuayRequest("error", "repository", duration)
 		logger.Error(err, "failed to query Quay.io API")
 		return err
@@ -605,12 +615,21 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 
 	r.updateCRWithQuayData(&cr, &repoInfo)
 
-	// Security scan enrichment (best-effort)
-	var cves []string
-	if ref.Digest != "" {
-		cves = r.enrichQuaySecurity(ctx, &cr, namespace, repo, ref.Digest)
-		r.enrichQuayManifest(ctx, &cr, namespace, repo, ref.Digest)
-		r.enrichQuayLabels(ctx, &cr, namespace, repo, ref.Digest)
+	// Supplementary enrichment is best-effort: a failure here must not discard
+	// the repository data above, so the errors are collected and returned only
+	// after the status write, which makes the worker retry.
+	var (
+		cves       []string
+		scanOK     bool
+		enrichErrs []error
+	)
+	scanAttempted := ref.Digest != ""
+	if scanAttempted {
+		var manifestOK, labelsOK bool
+		cves, scanOK = r.enrichQuaySecurity(ctx, &cr, namespace, repo, ref.Digest)
+		manifestOK = r.enrichQuayManifest(ctx, &cr, namespace, repo, ref.Digest)
+		labelsOK = r.enrichQuayLabels(ctx, &cr, namespace, repo, ref.Digest)
+		enrichErrs = appendQuayEnrichmentFailures(enrichErrs, crName, scanOK, manifestOK, labelsOK)
 	}
 
 	if err := r.Status().Update(ctx, &cr); err != nil {
@@ -618,8 +637,10 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 		return err
 	}
 
-	// Emit vulnerability events and CVE annotations after status update
-	if cr.Status.QuayData != nil && cr.Status.QuayData.Vulnerabilities != nil {
+	// Emit vulnerability events and CVE annotations after status update. A
+	// failed scan preserved the previous counts, so only a fresh scan may
+	// re-emit an event about them.
+	if scanOK && cr.Status.QuayData != nil && cr.Status.QuayData.Vulnerabilities != nil {
 		vulns := cr.Status.QuayData.Vulnerabilities
 		if vulns.Critical > 0 || vulns.Important > 0 {
 			if r.Recorder != nil {
@@ -631,13 +652,21 @@ func (r *PodReconciler) checkQuayData(ctx context.Context, crName string, ref *i
 		}
 	}
 
-	if len(cves) > 0 {
-		if updateErr := r.updateCVEAnnotations(ctx, crName, cves); updateErr != nil {
-			logger.Error(updateErr, "failed to update CVE annotations")
+	// A successful scan owns the annotation: an empty result removes a stale
+	// list. A failed scan leaves the previous one alone, so a transient Clair
+	// outage does not erase evidence. Skipping the scan entirely (no digest)
+	// also leaves it alone: there is no basis on which to clear it.
+	if scanOK {
+		if len(cves) > 0 {
+			if updateErr := r.updateCVEAnnotations(ctx, crName, cves); updateErr != nil {
+				logger.Error(updateErr, "failed to update CVE annotations")
+			}
+		} else if clearErr := r.clearCVEAnnotation(ctx, crName); clearErr != nil {
+			logger.Error(clearErr, "failed to clear CVE annotations")
 		}
 	}
 
-	return nil
+	return errors.Join(enrichErrs...)
 }
 
 // parseQuayRepo parses a repository path into namespace and repository name
@@ -649,11 +678,12 @@ func parseQuayRepo(repository string) (namespace, repo string) {
 	return repository, repository
 }
 
+// updateCRWithQuayData replaces the repository-owned fields of
+// status.quayData. The security, manifest, and label enrichment helpers own the
+// remaining fields and write them separately, so this must not touch them: a
+// failed scan has to leave the previous summary intact.
 func (r *PodReconciler) updateCRWithQuayData(cr *securityv1alpha1.ImageCertificationInfo, repo *quaylib.RepositoryWithTags) {
-	quayData := cr.Status.QuayData
-	if quayData == nil {
-		quayData = &securityv1alpha1.QuayData{}
-	}
+	quayData := ensureQuayData(cr)
 
 	quayData.IsPublic = repo.IsPublic
 	quayData.IsOrganization = repo.IsOrganization
@@ -662,17 +692,36 @@ func (r *PodReconciler) updateCRWithQuayData(cr *securityv1alpha1.ImageCertifica
 	quayData.Description = repo.Description
 	quayData.TagCount = len(repo.Tags.Tags)
 
-	latest := repo.LatestTagTimestamp()
-	if !latest.IsZero() {
+	// Only a tag timestamp the API still reports may produce these values, so
+	// drop them first: a repository whose tags all disappeared must not keep
+	// advertising the last tag it once had.
+	quayData.LastModified = nil
+	quayData.DaysSinceUpdate = nil
+
+	if latest := repo.LatestTagTimestamp(); !latest.IsZero() {
 		daysSince := quaylib.CalculateDaysSince(latest)
 		quayData.LastModified = &metav1.Time{Time: latest}
 		quayData.DaysSinceUpdate = &daysSince
 	}
-
-	cr.Status.QuayData = quayData
 }
 
-func (r *PodReconciler) enrichQuaySecurity(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) []string {
+// ensureQuayData returns status.quayData, creating it when absent. The
+// repository, security, manifest, and label paths each write a disjoint set of
+// fields, so they all need somewhere to write.
+func ensureQuayData(cr *securityv1alpha1.ImageCertificationInfo) *securityv1alpha1.QuayData {
+	if cr.Status.QuayData == nil {
+		cr.Status.QuayData = &securityv1alpha1.QuayData{}
+	}
+
+	return cr.Status.QuayData
+}
+
+// enrichQuaySecurity applies the Clair scan result and returns the CVE IDs it
+// reports. ok is false only when the request itself failed: the caller then
+// keeps whatever an earlier scan recorded.
+func (r *PodReconciler) enrichQuaySecurity(
+	ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string,
+) (cves []string, ok bool) {
 	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
 
 	start := time.Now()
@@ -682,24 +731,30 @@ func (r *PodReconciler) enrichQuaySecurity(ctx context.Context, cr *securityv1al
 	if err != nil {
 		metrics.RecordQuayRequest("error", "security", duration)
 		logger.V(1).Info("failed to query Quay security scan", "error", err)
-		return nil
+		return nil, false
 	}
 
 	metrics.RecordQuayRequest("success", "security", duration)
 
-	if scan == nil {
-		return nil
-	}
+	quayData := ensureQuayData(cr)
 
-	cr.Status.QuayData.SecurityScanStatus = scan.Status
+	// The request succeeded, so this helper owns the scan fields from here on:
+	// a scan that reports nothing clears whatever an earlier cycle recorded.
+	quayData.SecurityScanStatus = ""
+	quayData.Vulnerabilities = nil
+	quayData.TotalVulnerabilities = 0
+	quayData.FixableVulnerabilities = 0
+
+	if scan == nil {
+		return nil, true
+	}
+	quayData.SecurityScanStatus = scan.Status
 
 	if scan.Data == nil || scan.Data.Layer == nil {
-		return nil
+		return nil, true
 	}
 
 	var critical, important, moderate, low, total, fixable int
-	var cves []string
-
 	for i := range scan.Data.Layer.Features {
 		for j := range scan.Data.Layer.Features[i].Vulnerabilities {
 			vuln := &scan.Data.Layer.Features[i].Vulnerabilities[j]
@@ -714,6 +769,10 @@ func (r *PodReconciler) enrichQuaySecurity(ctx context.Context, cr *securityv1al
 				cves = append(cves, vuln.Name)
 			case "High":
 				important++
+				// High vulnerabilities are named too: the Pyxis path writes every
+				// CVE it is given, and an annotation that means different things
+				// per registry is worse than no annotation.
+				cves = append(cves, vuln.Name)
 			case "Medium":
 				moderate++
 			case "Low":
@@ -722,19 +781,23 @@ func (r *PodReconciler) enrichQuaySecurity(ctx context.Context, cr *securityv1al
 		}
 	}
 
-	cr.Status.QuayData.Vulnerabilities = &securityv1alpha1.VulnerabilitySummary{
+	quayData.Vulnerabilities = &securityv1alpha1.VulnerabilitySummary{
 		Critical:  critical,
 		Important: important,
 		Moderate:  moderate,
 		Low:       low,
 	}
-	cr.Status.QuayData.TotalVulnerabilities = total
-	cr.Status.QuayData.FixableVulnerabilities = fixable
+	quayData.TotalVulnerabilities = total
+	quayData.FixableVulnerabilities = fixable
 
-	return cves
+	return cves, true
 }
 
-func (r *PodReconciler) enrichQuayManifest(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) {
+// enrichQuayManifest applies the manifest metadata. ok is false only when the
+// request itself failed.
+func (r *PodReconciler) enrichQuayManifest(
+	ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string,
+) (ok bool) {
 	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
 
 	start := time.Now()
@@ -744,18 +807,27 @@ func (r *PodReconciler) enrichQuayManifest(ctx context.Context, cr *securityv1al
 	if err != nil {
 		metrics.RecordQuayRequest("error", "manifest", duration)
 		logger.V(1).Info("failed to query Quay manifest", "error", err)
-		return
+		return false
 	}
 
 	metrics.RecordQuayRequest("success", "manifest", duration)
 
+	quayData := ensureQuayData(cr)
+
+	// A successful request that carries no manifest clears the previous values.
+	quayData.LayerCount = 0
+	quayData.CompressedSizeBytes = 0
+	quayData.IsManifestList = false
+
 	if manifest == nil {
-		return
+		return true
 	}
 
-	cr.Status.QuayData.LayerCount = len(manifest.Layers)
-	cr.Status.QuayData.CompressedSizeBytes = manifest.LayersCompressedSize
-	cr.Status.QuayData.IsManifestList = manifest.IsManifestList
+	quayData.LayerCount = len(manifest.Layers)
+	quayData.CompressedSizeBytes = manifest.LayersCompressedSize
+	quayData.IsManifestList = manifest.IsManifestList
+
+	return true
 }
 
 var quayLabelKeys = map[string]func(*securityv1alpha1.QuayData, string){
@@ -766,7 +838,11 @@ var quayLabelKeys = map[string]func(*securityv1alpha1.QuayData, string){
 	"vcs-ref":                  func(q *securityv1alpha1.QuayData, v string) { q.VCSRef = v },
 }
 
-func (r *PodReconciler) enrichQuayLabels(ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string) {
+// enrichQuayLabels applies the OCI labels Quay knows about. ok is false only
+// when the request itself failed.
+func (r *PodReconciler) enrichQuayLabels(
+	ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, namespace, repo, digest string,
+) (ok bool) {
 	logger := log.FromContext(ctx).WithValues("crName", cr.Name)
 
 	start := time.Now()
@@ -776,20 +852,48 @@ func (r *PodReconciler) enrichQuayLabels(ctx context.Context, cr *securityv1alph
 	if err != nil {
 		metrics.RecordQuayRequest("error", "labels", duration)
 		logger.V(1).Info("failed to query Quay manifest labels", "error", err)
-		return
+		return false
 	}
 
 	metrics.RecordQuayRequest("success", "labels", duration)
 
+	quayData := ensureQuayData(cr)
+
+	// Reset first: a label the manifest no longer carries must not survive.
+	quayData.Vendor = ""
+	quayData.Architecture = ""
+	quayData.BuildDate = ""
+	quayData.LicenseURL = ""
+	quayData.VCSRef = ""
+
 	if labels == nil {
-		return
+		return true
 	}
 
 	for i := range labels.Labels {
 		if setter, ok := quayLabelKeys[labels.Labels[i].Key]; ok {
-			setter(cr.Status.QuayData, labels.Labels[i].Value)
+			setter(quayData, labels.Labels[i].Value)
 		}
 	}
+
+	return true
+}
+
+// appendQuayEnrichmentFailures appends one error per supplementary Quay call
+// that failed. The helpers log the cause; this only carries the retry signal
+// back to the caller so a successful repository lookup is not thrown away.
+func appendQuayEnrichmentFailures(errs []error, crName string, securityOK, manifestOK, labelsOK bool) []error {
+	if !securityOK {
+		errs = append(errs, fmt.Errorf("quay security enrichment failed for %s", crName))
+	}
+	if !manifestOK {
+		errs = append(errs, fmt.Errorf("quay manifest enrichment failed for %s", crName))
+	}
+	if !labelsOK {
+		errs = append(errs, fmt.Errorf("quay labels enrichment failed for %s", crName))
+	}
+
+	return errs
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -1009,6 +1113,30 @@ func (r *PodReconciler) enrichmentWorker(ctx context.Context) {
 	}
 }
 
+// permanentError marks an enrichment failure that retrying cannot fix, such as
+// an authorization denial. The worker forgets these instead of spending the
+// backoff on them.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// isQuayDenied reports whether err is an authorization answer from Quay.
+func isQuayDenied(err error) bool {
+	return quaylib.IsUnauthorized(err) || quaylib.IsForbidden(err)
+}
+
+// classifyQuayError marks an authorization answer as permanent. Quay returns
+// 401/403 for repositories the token may not see, including repositories that
+// no longer exist, so backing off and trying again cannot change the answer.
+func classifyQuayError(err error) error {
+	if isQuayDenied(err) {
+		return &permanentError{err: err}
+	}
+
+	return err
+}
+
 // processEnrichRequest enriches one image once and decides whether to retry it.
 // Retries use the queue's exponential backoff so a transient API failure is
 // retried within seconds instead of waiting for the 24h refresh cycle.
@@ -1024,6 +1152,13 @@ func (r *PodReconciler) processEnrichRequest(ctx context.Context, item enrichReq
 
 	// Do not requeue work the manager cancelled; the queue is shutting down.
 	if ctx.Err() != nil {
+		r.EnrichQueue.Forget(item)
+
+		return
+	}
+
+	if _, ok := errors.AsType[*permanentError](err); ok {
+		logger.Info("not retrying image enrichment after a permanent failure", "error", err)
 		r.EnrichQueue.Forget(item)
 
 		return
@@ -1140,6 +1275,9 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 	// clearCVEs marks that the refresh found no CVE data, so an annotation from
 	// an earlier cycle has to be removed.
 	var clearCVEs bool
+	// enrichErrs collects supplementary enrichment failures. They are returned
+	// only after the status write so the data that did succeed is persisted.
+	var enrichErrs []error
 
 	// Refresh based on registry type
 	if image.IsRedHatRegistry(cr.Spec.Registry) && r.PyxisClient != nil {
@@ -1176,21 +1314,35 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 
 		if repoInfo != nil {
 			r.updateCRWithDockerHubData(&latestCR, repoInfo)
+		} else {
+			// Docker Hub answered successfully but no longer knows this
+			// repository, so the previous payload is stale.
+			clearDockerHubStatus(&latestCR)
 		}
 	} else if cr.Spec.Registry == RegistryQuayIO && r.QuayClient != nil {
 		namespace, repo := parseQuayRepo(cr.Spec.Repository)
 		repoInfo, err := r.QuayClient.GetRepository(ctx, namespace, repo)
 		if err != nil {
-			logger.Error(err, "failed to query Quay.io API during refresh")
-			return err
+			if isQuayDenied(err) {
+				logger.Info("Quay denied access to the repository; keeping the previous enrichment", "error", err)
+			} else {
+				logger.Error(err, "failed to query Quay.io API during refresh")
+			}
+
+			return classifyQuayError(err)
 		}
 
 		r.updateCRWithQuayData(&latestCR, &repoInfo)
 
 		if cr.Spec.ImageDigest != "" {
-			cves = r.enrichQuaySecurity(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
-			r.enrichQuayManifest(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
-			r.enrichQuayLabels(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			var scanOK, manifestOK, labelsOK bool
+			cves, scanOK = r.enrichQuaySecurity(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			manifestOK = r.enrichQuayManifest(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			labelsOK = r.enrichQuayLabels(ctx, &latestCR, namespace, repo, cr.Spec.ImageDigest)
+			enrichErrs = appendQuayEnrichmentFailures(enrichErrs, cr.Name, scanOK, manifestOK, labelsOK)
+			// Only a successful scan may retire an annotation; a failed one
+			// leaves the previous list in place.
+			clearCVEs = scanOK && len(cves) == 0
 		}
 	} else {
 		// No client available for this registry
@@ -1219,7 +1371,7 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 	newSnapshot := snapshotImageState(&latestCR)
 	r.emitChangeEvents(&latestCR, oldSnapshot, newSnapshot)
 
-	return nil
+	return errors.Join(enrichErrs...)
 }
 
 // updateCRWithPyxisData updates a CR's status with data from Pyxis
@@ -1304,6 +1456,20 @@ func clearPyxisStatus(cr *securityv1alpha1.ImageCertificationInfo) {
 	cr.Status.PyxisData = nil
 	cr.Status.ImageAge = ""
 	cr.Status.DaysUntilEOL = nil
+}
+
+// clearDockerHubStatus drops the Docker Hub payload when the repository is no
+// longer known to Docker Hub. Only the certification states Docker Hub is
+// responsible for are reset; a state set by another source is left alone.
+func clearDockerHubStatus(cr *securityv1alpha1.ImageCertificationInfo) {
+	cr.Status.DockerHubData = nil
+
+	switch cr.Status.CertificationStatus {
+	case securityv1alpha1.CertificationStatusOfficial,
+		securityv1alpha1.CertificationStatusVerified,
+		securityv1alpha1.CertificationStatusNotCertified:
+		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusUnknown
+	}
 }
 
 // clearCVEAnnotation removes the CVE annotation when a refresh no longer has

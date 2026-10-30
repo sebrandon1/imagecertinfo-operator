@@ -27,6 +27,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -306,7 +307,18 @@ func main() {
 			pyxisAPIKeySecretKey,
 		)
 		if err != nil {
-			setupLog.Error(err, "failed to read Pyxis API key from Secret")
+			if apierrors.IsForbidden(err) {
+				// The shipped Role grants get on one Secret name in the operator
+				// namespace. Without this hint a Forbidden read looks like a
+				// generic startup failure followed by CrashLoopBackOff.
+				setupLog.Error(err, "failed to read Pyxis API key from Secret: RBAC denied",
+					"hint", "the shipped Role only permits reading a Secret named pyxis-api-key "+
+						"in the operator namespace; patch the Role's resourceNames or use --pyxis-api-key",
+					"secretName", pyxisAPIKeySecretName,
+					"secretNamespace", pyxisAPIKeySecretNamespace)
+			} else {
+				setupLog.Error(err, "failed to read Pyxis API key from Secret")
+			}
 			os.Exit(1)
 		}
 		pyxisAPIKey = apiKey

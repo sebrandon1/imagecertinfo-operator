@@ -21,6 +21,17 @@ The operator exposes metrics at the `/metrics` endpoint. All metrics use the `im
 | `imagecertinfo_pyxis_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
 | `imagecertinfo_pyxis_cache_entries` | Gauge | - | Number of entries resident in the cache |
 
+## Quay.io API Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `imagecertinfo_quay_requests_total` | Counter | `status`, `endpoint` | Total Quay API requests. `status` is `success`, `error`, or `denied` (the request was answered with 401/403); `endpoint` is `repository`, `security`, `manifest`, or `labels` |
+| `imagecertinfo_quay_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
+
+A `denied` request is not retried and leaves the previous enrichment in place, so a
+rising `denied` rate means the operator can no longer see the repository rather than
+that Quay is failing.
+
 ## Reconciliation Metrics
 
 | Metric | Type | Labels | Description |
