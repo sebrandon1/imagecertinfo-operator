@@ -970,27 +970,33 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 		return err
 	}
 
+	// List pods once and check references against the set, rather than doing a
+	// cached Get (and deep copy) per reference. A failed List aborts the cycle
+	// without touching any CR.
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList); err != nil {
+		return err
+	}
+
+	existing := make(map[types.NamespacedName]struct{}, len(podList.Items))
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		existing[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}] = struct{}{}
+	}
+
 	for i := range crList.Items {
 		cr := &crList.Items[i]
 		var validRefs []securityv1alpha1.PodReference
 
 		for _, podRef := range cr.Status.PodReferences {
-			// Check if pod still exists
-			var pod corev1.Pod
-			err := r.Get(ctx, client.ObjectKey{
+			if _, ok := existing[types.NamespacedName{
 				Namespace: podRef.Namespace,
 				Name:      podRef.Name,
-			}, &pod)
-
-			if err == nil {
+			}]; ok {
 				// Pod exists, keep the reference
 				validRefs = append(validRefs, podRef)
-			} else if !apierrors.IsNotFound(err) {
-				// Error other than not found, keep the reference to be safe
-				validRefs = append(validRefs, podRef)
-				logger.Error(err, "error checking pod existence", "namespace", podRef.Namespace, "name", podRef.Name)
 			}
-			// If not found, the reference is stale and won't be kept
+			// Otherwise the reference is stale and won't be kept
 		}
 
 		if len(validRefs) != len(cr.Status.PodReferences) {
