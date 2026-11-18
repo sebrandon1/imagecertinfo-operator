@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -413,6 +414,9 @@ func extractArchitectures(grades []PyxisContentStreamGrade) []string {
 	for arch := range archSet {
 		archs = append(archs, arch)
 	}
+	// Map iteration is unordered; sort so identical API responses produce
+	// identical status and no needless CR writes.
+	slices.Sort(archs)
 	return archs
 }
 
@@ -550,6 +554,10 @@ func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, image
 	for id := range advisorySet {
 		advisoryIDs = append(advisoryIDs, id)
 	}
+	// Map iteration is unordered; sort so identical API responses produce
+	// identical status. CVEs keep the API's order: the annotation truncation
+	// logic depends on it.
+	slices.Sort(advisoryIDs)
 
 	return cves, advisoryIDs
 }

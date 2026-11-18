@@ -30,6 +30,13 @@ import (
 const (
 	testPyxisRegistry   = "registry.redhat.io"
 	testPyxisRepository = "ubi8/ubi"
+
+	testArchAMD64   = "amd64"
+	testArchARM64   = "arm64"
+	testArchPPC64LE = "ppc64le"
+	testArchS390X   = "s390x"
+
+	testAdvisoryOne = "RHSA-2026:0001"
 )
 
 func TestHTTPClient_GetImageCertification(t *testing.T) {
@@ -74,8 +81,8 @@ func TestHTTPClient_GetImageCertification(t *testing.T) {
 				TotalSizeBytes:           100000000,
 				CanAutoReleaseCVERebuild: true,
 				ContentStreamGrades: []PyxisContentStreamGrade{
-					{Architecture: "amd64", Grade: "A"},
-					{Architecture: "arm64", Grade: "A"},
+					{Architecture: testArchAMD64, Grade: "A"},
+					{Architecture: testArchARM64, Grade: "A"},
 				},
 			},
 			repoResponse: &PyxisContainerRepository{
@@ -438,5 +445,79 @@ func TestHTTPClient_FetchAndParseResponse_RetriesTransportErrors(t *testing.T) {
 	}
 	if got := attempts.Load(); got != maxRetryAttempts {
 		t.Errorf("attempts = %d, want %d", got, maxRetryAttempts)
+	}
+}
+
+func TestExtractArchitectures_Sorted(t *testing.T) {
+	grades := []PyxisContentStreamGrade{
+		{Architecture: testArchS390X, Grade: "A"},
+		{Architecture: testArchAMD64, Grade: "A"},
+		{Architecture: testArchPPC64LE, Grade: "B"},
+		{Architecture: testArchARM64, Grade: "A"},
+		{Architecture: testArchAMD64, Grade: "B"},
+	}
+
+	want := []string{testArchAMD64, testArchARM64, testArchPPC64LE, testArchS390X}
+	for range 20 {
+		got := extractArchitectures(grades)
+		if len(got) != len(want) {
+			t.Fatalf("extractArchitectures() = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("extractArchitectures() = %v, want %v", got, want)
+			}
+		}
+	}
+}
+
+func TestExtractArchitectures_Empty(t *testing.T) {
+	got := extractArchitectures(nil)
+	if got == nil {
+		t.Fatal("extractArchitectures(nil) = nil, want an empty non-nil slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("extractArchitectures(nil) = %v, want empty", got)
+	}
+}
+
+func TestHTTPClient_GetVulnerabilitiesWithAdvisories_Sorted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(PyxisVulnerabilitiesResponse{Data: []PyxisVulnerability{
+			{CVEID: "CVE-2026-0003", AdvisoryID: "RHSA-2026:0003"},
+			{CVEID: "CVE-2026-0001", AdvisoryID: testAdvisoryOne},
+			{CVEID: "CVE-2026-0002", AdvisoryID: "RHSA-2026:0002"},
+			{CVEID: "CVE-2026-0004", AdvisoryID: testAdvisoryOne},
+		}})
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	wantAdvisories := []string{testAdvisoryOne, "RHSA-2026:0002", "RHSA-2026:0003"}
+	// CVEs keep the API order; only advisories are sorted.
+	wantCVEs := []string{"CVE-2026-0003", "CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0004"}
+
+	for range 20 {
+		cves, advisories := client.getVulnerabilitiesWithAdvisories(context.Background(), "image-id")
+
+		if len(cves) != len(wantCVEs) {
+			t.Fatalf("cves = %v, want %v", cves, wantCVEs)
+		}
+		for i := range wantCVEs {
+			if cves[i] != wantCVEs[i] {
+				t.Fatalf("cves = %v, want %v (API order must be preserved)", cves, wantCVEs)
+			}
+		}
+
+		if len(advisories) != len(wantAdvisories) {
+			t.Fatalf("advisories = %v, want %v", advisories, wantAdvisories)
+		}
+		for i := range wantAdvisories {
+			if advisories[i] != wantAdvisories[i] {
+				t.Fatalf("advisories = %v, want %v", advisories, wantAdvisories)
+			}
+		}
 	}
 }
