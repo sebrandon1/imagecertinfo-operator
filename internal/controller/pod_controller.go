@@ -1044,8 +1044,16 @@ func (r *PodReconciler) StartRefreshLoop(ctx context.Context, interval time.Dura
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Do not re-query an image that was checked less than half an interval ago.
+	// Deriving the stagger from the configured interval means a short interval
+	// is honoured instead of being overridden by a fixed floor, and a long one
+	// still leaves half a cycle of slack for the check to land. The floor keeps
+	// a tiny interval from turning into back-to-back queries.
+	minRefreshAge := max(interval/2, time.Minute)
+	logger.Info("refresh staggering enabled", "minRefreshAge", minRefreshAge)
+
 	// Run immediately after startup delay
-	if err := r.RefreshAllImages(ctx); err != nil {
+	if err := r.RefreshAllImages(ctx, minRefreshAge); err != nil {
 		logger.Error(err, "failed to refresh images")
 	}
 
@@ -1054,7 +1062,7 @@ func (r *PodReconciler) StartRefreshLoop(ctx context.Context, interval time.Dura
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := r.RefreshAllImages(ctx); err != nil {
+			if err := r.RefreshAllImages(ctx, minRefreshAge); err != nil {
 				logger.Error(err, "failed to refresh images")
 			}
 		}
@@ -1189,8 +1197,10 @@ func (r *PodReconciler) enrich(ctx context.Context, item enrichRequest) error {
 	}
 }
 
-// RefreshAllImages refreshes certification data for all Red Hat registry images
-func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
+// RefreshAllImages refreshes certification data for all Red Hat registry images.
+// A Red Hat image checked less than minRefreshAge ago is skipped; a
+// non-positive minRefreshAge skips nothing.
+func (r *PodReconciler) RefreshAllImages(ctx context.Context, minRefreshAge time.Duration) error {
 	logger := log.FromContext(ctx).WithName("refresh")
 	start := time.Now()
 
@@ -1218,9 +1228,9 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context) error {
 			continue
 		}
 
-		// Skip if checked within the last hour (staggering)
-		if cr.Status.LastPyxisCheckAt != nil && isRedHatRegistry {
-			if time.Since(cr.Status.LastPyxisCheckAt.Time) < time.Hour {
+		// Skip if checked more recently than the stagger allows
+		if minRefreshAge > 0 && cr.Status.LastPyxisCheckAt != nil && isRedHatRegistry {
+			if time.Since(cr.Status.LastPyxisCheckAt.Time) < minRefreshAge {
 				skipped++
 				continue
 			}
