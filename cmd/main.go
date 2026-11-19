@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -130,11 +131,11 @@ func main() {
 	flag.StringVar(&pyxisAPIKey, "pyxis-api-key", "",
 		"Optional API key for Pyxis authentication (public API works without auth, can also use PYXIS_API_KEY env var)")
 	flag.DurationVar(&cleanupInterval, "cleanup-interval", 5*time.Minute,
-		"Interval for cleaning up stale pod references")
+		"Interval for cleaning up stale pod references (must be greater than zero)")
 	flag.IntVar(&enrichmentWorkers, "enrichment-workers", controller.DefaultEnrichmentWorkers,
 		"Number of concurrent workers enriching newly discovered images (default 4)")
 	flag.DurationVar(&pyxisCacheTTL, "pyxis-cache-ttl", pyxis.DefaultCacheTTL,
-		"TTL for cached Pyxis API responses (default 1 hour)")
+		"TTL for cached Pyxis API responses (must be > 0; use --pyxis-enabled=false to disable enrichment)")
 	flag.IntVar(&pyxisCacheMaxEntries, "pyxis-cache-max-entries", pyxis.DefaultCacheMaxEntries,
 		"Maximum number of cached Pyxis responses (0 or less for unlimited, default 10000)")
 	flag.Float64Var(&pyxisRateLimit, "pyxis-rate-limit", pyxis.DefaultRateLimit,
@@ -148,7 +149,7 @@ func main() {
 	flag.BoolVar(&dockerHubEnabled, "dockerhub-enabled", true,
 		"Enable Docker Hub metadata enrichment for docker.io images")
 	flag.DurationVar(&dockerHubCacheTTL, "dockerhub-cache-ttl", dockerhub.DefaultCacheTTL,
-		"TTL for cached Docker Hub API responses (default 1 hour)")
+		"TTL for cached Docker Hub API responses (must be > 0; use --dockerhub-enabled=false to disable enrichment)")
 	flag.IntVar(&dockerHubCacheMaxEntries, "dockerhub-cache-max-entries", dockerhub.DefaultCacheMaxEntries,
 		"Maximum number of cached Docker Hub responses (0 or less for unlimited, default 10000)")
 	flag.Float64Var(&dockerHubRateLimit, "dockerhub-rate-limit", dockerhub.DefaultRateLimit,
@@ -160,7 +161,7 @@ func main() {
 	flag.BoolVar(&quayEnabled, "quay-enabled", true,
 		"Enable Quay.io metadata enrichment for quay.io images")
 	flag.DurationVar(&quayCacheTTL, "quay-cache-ttl", quaylib.DefaultCacheTTL,
-		"TTL for cached Quay.io API responses (default 1 hour)")
+		"TTL for cached Quay.io API responses (must be > 0; use --quay-enabled=false to disable enrichment)")
 	flag.Float64Var(&quayRateLimit, "quay-rate-limit", quaylib.DefaultRateLimit,
 		"Rate limit for Quay.io API requests per second (default 5)")
 	flag.IntVar(&quayRateBurst, "quay-rate-burst", quaylib.DefaultRateBurst,
@@ -181,6 +182,13 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := validateIntervals(
+		cleanupInterval, pyxisCacheTTL, dockerHubCacheTTL, quayCacheTTL, pyxisRefreshInterval,
+	); err != nil {
+		setupLog.Error(err, "invalid interval flag")
+		os.Exit(1)
+	}
 
 	// Priority order for Pyxis API key: flag > env var > Secret
 	// Check for API key in environment variable if not set via flag
@@ -516,6 +524,33 @@ func refreshLoopEnabled(interval time.Duration, clients ...any) bool {
 	}
 
 	return false
+}
+
+// validateIntervals rejects flag values that would panic a periodic loop.
+// time.NewTicker panics on a non-positive duration, and the cache loops derive
+// their interval as cacheTTL/2, which truncates a sub-2ns TTL to zero. The
+// refresh interval is allowed to be zero (disabled); a negative one is not.
+func validateIntervals(cleanup, pyxisTTL, dockerHubTTL, quayTTL, refresh time.Duration) error {
+	checks := []struct {
+		name  string
+		value time.Duration
+	}{
+		{"--cleanup-interval", cleanup},
+		{"--pyxis-cache-ttl", pyxisTTL},
+		{"--dockerhub-cache-ttl", dockerHubTTL},
+		{"--quay-cache-ttl", quayTTL},
+	}
+	for _, check := range checks {
+		if check.value <= 0 {
+			return fmt.Errorf("%s must be greater than zero, got %s", check.name, check.value)
+		}
+	}
+
+	if refresh < 0 {
+		return fmt.Errorf("--pyxis-refresh-interval must not be negative, got %s", refresh)
+	}
+
+	return nil
 }
 
 // addCacheCleanup registers the periodic cache cleanup loop for a cache-wrapped

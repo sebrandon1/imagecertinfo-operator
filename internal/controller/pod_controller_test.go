@@ -3220,3 +3220,19 @@ func TestPodReconciler_Reconcile_InitContainer(t *testing.T) {
 		t.Errorf("PodReferences = %+v, want one reference to the init container", got)
 	}
 }
+
+func TestPodReconciler_StartCleanupLoop_NonPositiveInterval(t *testing.T) {
+	reconciler := &PodReconciler{}
+
+	done := make(chan error, 1)
+	go func() { done <- reconciler.StartCleanupLoop(context.Background(), 0) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("StartCleanupLoop(ctx, 0) error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StartCleanupLoop(ctx, 0) blocked, want an immediate return")
+	}
+}

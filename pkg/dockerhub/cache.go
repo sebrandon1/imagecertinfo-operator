@@ -211,6 +211,12 @@ func (c *CachedClient) cleanupExpiredLocked() {
 
 // StartCleanupLoop starts a goroutine that periodically cleans up expired cache entries
 func (c *CachedClient) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	// The interval is validated at startup; this guards programmatic callers
+	// because time.NewTicker panics on a non-positive duration.
+	if interval <= 0 {
+		return
+	}
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
