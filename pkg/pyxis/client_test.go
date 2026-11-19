@@ -19,12 +19,17 @@ package pyxis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 )
 
 const (
@@ -37,6 +42,7 @@ const (
 	testArchS390X   = "s390x"
 
 	testAdvisoryOne = "RHSA-2026:0001"
+	testCVEOne      = "CVE-2026-0001"
 )
 
 func TestHTTPClient_GetImageCertification(t *testing.T) {
@@ -486,7 +492,7 @@ func TestHTTPClient_GetVulnerabilitiesWithAdvisories_Sorted(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(PyxisVulnerabilitiesResponse{Data: []PyxisVulnerability{
 			{CVEID: "CVE-2026-0003", AdvisoryID: "RHSA-2026:0003"},
-			{CVEID: "CVE-2026-0001", AdvisoryID: testAdvisoryOne},
+			{CVEID: testCVEOne, AdvisoryID: testAdvisoryOne},
 			{CVEID: "CVE-2026-0002", AdvisoryID: "RHSA-2026:0002"},
 			{CVEID: "CVE-2026-0004", AdvisoryID: testAdvisoryOne},
 		}})
@@ -497,7 +503,7 @@ func TestHTTPClient_GetVulnerabilitiesWithAdvisories_Sorted(t *testing.T) {
 
 	wantAdvisories := []string{testAdvisoryOne, "RHSA-2026:0002", "RHSA-2026:0003"}
 	// CVEs keep the API order; only advisories are sorted.
-	wantCVEs := []string{"CVE-2026-0003", "CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0004"}
+	wantCVEs := []string{"CVE-2026-0003", testCVEOne, "CVE-2026-0002", "CVE-2026-0004"}
 
 	for range 20 {
 		cves, advisories := client.getVulnerabilitiesWithAdvisories(context.Background(), "image-id")
@@ -519,5 +525,190 @@ func TestHTTPClient_GetVulnerabilitiesWithAdvisories_Sorted(t *testing.T) {
 				t.Fatalf("advisories = %v, want %v", advisories, wantAdvisories)
 			}
 		}
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_RetriesTransientFailure(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"_id":"repo-1","eol_date":"2030-01-01","release_categories":["Generally Available"]}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	info := client.getRepositoryInfo(context.Background(), "registry.redhat.io", "ubi8/ubi")
+	if info == nil {
+		t.Fatal("getRepositoryInfo() = nil, want the retried response")
+	}
+	if info.EOLDate != "2030-01-01" {
+		t.Errorf("EOLDate = %q, want 2030-01-01", info.EOLDate)
+	}
+	if info.ReleaseCategory != "Generally Available" {
+		t.Errorf("ReleaseCategory = %q, want Generally Available", info.ReleaseCategory)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+	if got := testutil.ToFloat64(metrics.PyxisRequestsTotal.WithLabelValues("success", "repository")); got < 1 {
+		t.Errorf("pyxis_requests_total{endpoint=\"repository\"} = %v, want at least 1", got)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_Failures(t *testing.T) {
+	shortRetryBase(t)
+
+	tests := []struct {
+		name       string
+		status     int
+		wantStatus string
+	}{
+		{name: "404 is not found", status: http.StatusNotFound, wantStatus: "not_found"},
+		{name: "permanent 500 is an error", status: http.StatusInternalServerError, wantStatus: "error"},
+		{name: "403 is not retried", status: http.StatusForbidden, wantStatus: "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			client := NewHTTPClient(WithBaseURL(server.URL))
+
+			if info := client.getRepositoryInfo(context.Background(), "registry.redhat.io", "ubi8/ubi"); info != nil {
+				t.Fatalf("getRepositoryInfo() = %+v, want nil so enrichment stays best-effort", info)
+			}
+			if got := testutil.ToFloat64(metrics.PyxisRequestsTotal.WithLabelValues(tt.wantStatus, "repository")); got < 1 {
+				t.Errorf("pyxis_requests_total{status=%q,endpoint=\"repository\"} = %v, want at least 1",
+					tt.wantStatus, got)
+			}
+		})
+	}
+}
+
+func TestHTTPClient_GetVulnerabilitiesWithAdvisories_RetriesTransientFailure(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"cve_id":"` + testCVEOne + `","severity":"Critical","advisory_id":"RHSA-2026:1"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	cves, advisories := client.getVulnerabilitiesWithAdvisories(context.Background(), "img-1")
+	if len(cves) != 1 || cves[0] != testCVEOne {
+		t.Errorf("CVEs = %v, want [%s]", cves, testCVEOne)
+	}
+	if len(advisories) != 1 || advisories[0] != "RHSA-2026:1" {
+		t.Errorf("advisories = %v, want [RHSA-2026:1]", advisories)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+}
+
+func TestHTTPClient_GetVulnerabilitiesWithAdvisories_PermanentFailureIsEmpty(t *testing.T) {
+	shortRetryBase(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	cves, advisories := client.getVulnerabilitiesWithAdvisories(context.Background(), "img-1")
+	if len(cves) != 0 || len(advisories) != 0 {
+		t.Errorf("getVulnerabilitiesWithAdvisories() = %v, %v, want empty slices", cves, advisories)
+	}
+	if got := testutil.ToFloat64(metrics.PyxisRequestsTotal.WithLabelValues("error", "vulnerabilities")); got < 1 {
+		t.Errorf("pyxis_requests_total{status=\"error\",endpoint=\"vulnerabilities\"} = %v, want at least 1", got)
+	}
+}
+
+func TestHTTPClient_GetVulnerabilitiesWithAdvisories_NotFoundIsEmpty(t *testing.T) {
+	shortRetryBase(t)
+
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	cves, advisories := client.getVulnerabilitiesWithAdvisories(context.Background(), "img-1")
+	if len(cves) != 0 || len(advisories) != 0 {
+		t.Errorf("getVulnerabilitiesWithAdvisories() = %v, %v, want empty slices", cves, advisories)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1: a 404 is an answer, not a retryable failure", got)
+	}
+	if got := testutil.ToFloat64(metrics.PyxisRequestsTotal.WithLabelValues("not_found", "vulnerabilities")); got < 1 {
+		t.Errorf("pyxis_requests_total{status=\"not_found\",endpoint=\"vulnerabilities\"} = %v, want at least 1", got)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_MalformedJSONIsAnError(t *testing.T) {
+	shortRetryBase(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`this is not json`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	if info := client.getRepositoryInfo(context.Background(), "registry.redhat.io", "ubi8/ubi"); info != nil {
+		t.Fatalf("getRepositoryInfo() = %+v, want nil when the body cannot be parsed", info)
+	}
+	if got := testutil.ToFloat64(metrics.PyxisRequestsTotal.WithLabelValues("error", "repository")); got < 1 {
+		t.Errorf("pyxis_requests_total{status=\"error\",endpoint=\"repository\"} = %v, want at least 1", got)
+	}
+}
+
+func TestHTTPClient_DoJSONWithRetry_StopsWhenContextExpires(t *testing.T) {
+	shortRetryBase(t)
+
+	// The server asks for a long backoff; the caller's deadline expires first,
+	// so the retry loop must return instead of sleeping through it.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	start := time.Now()
+	var out map[string]any
+	err := client.doJSONWithRetry(ctx, server.URL+"/repositories", &out)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("doJSONWithRetry() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("doJSONWithRetry() took %v, want it to stop at the deadline", elapsed)
 	}
 }
