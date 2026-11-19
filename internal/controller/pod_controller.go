@@ -565,13 +565,29 @@ func (r *PodReconciler) updateCRWithDockerHubData(cr *securityv1alpha1.ImageCert
 	}
 
 	// Update certification status based on Docker Hub trust level
-	if repoInfo.IsOfficial {
+	switch {
+	case repoInfo.IsOfficial:
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusOfficial
-	} else if repoInfo.IsVerifiedPublisher {
+	case repoInfo.IsVerifiedPublisher:
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusVerified
-	} else if cr.Status.CertificationStatus == securityv1alpha1.CertificationStatusUnknown {
-		// Only update to NotCertified if currently Unknown
+	case isDockerHubTrustStatus(cr.Status.CertificationStatus):
 		cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusNotCertified
+	}
+}
+
+// isDockerHubTrustStatus reports whether a certification status is one the
+// Docker Hub path owns and may therefore demote. A successful lookup that
+// reports no badge downgrades these to NotCertified. The Pyxis values
+// (Certified, Pending, Error) are excluded: this path only speaks for Docker
+// Hub.
+func isDockerHubTrustStatus(status securityv1alpha1.CertificationStatus) bool {
+	switch status {
+	case securityv1alpha1.CertificationStatusOfficial,
+		securityv1alpha1.CertificationStatusVerified,
+		securityv1alpha1.CertificationStatusUnknown:
+		return true
+	default:
+		return false
 	}
 }
 

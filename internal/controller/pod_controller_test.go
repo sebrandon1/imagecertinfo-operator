@@ -3236,3 +3236,116 @@ func TestPodReconciler_StartCleanupLoop_NonPositiveInterval(t *testing.T) {
 		t.Fatal("StartCleanupLoop(ctx, 0) blocked, want an immediate return")
 	}
 }
+
+func TestUpdateCRWithDockerHubData_TrustTransitions(t *testing.T) {
+	repoInfo := func(official, verified bool) *dockerhub.RepositoryInfo {
+		return &dockerhub.RepositoryInfo{
+			IsOfficial:          official,
+			IsVerifiedPublisher: verified,
+			LastUpdated:         time.Now(),
+		}
+	}
+
+	tests := []struct {
+		name  string
+		start securityv1alpha1.CertificationStatus
+		info  *dockerhub.RepositoryInfo
+		want  securityv1alpha1.CertificationStatus
+	}{
+		{
+			name:  "Verified is downgraded when the badge disappears",
+			start: securityv1alpha1.CertificationStatusVerified,
+			info:  repoInfo(false, false),
+			want:  securityv1alpha1.CertificationStatusNotCertified,
+		},
+		{
+			name:  "Official is downgraded when the image is no longer official",
+			start: securityv1alpha1.CertificationStatusOfficial,
+			info:  repoInfo(false, false),
+			want:  securityv1alpha1.CertificationStatusNotCertified,
+		},
+		{
+			name:  "Unknown becomes NotCertified",
+			start: securityv1alpha1.CertificationStatusUnknown,
+			info:  repoInfo(false, false),
+			want:  securityv1alpha1.CertificationStatusNotCertified,
+		},
+		{
+			name:  "Pyxis Certified is left alone",
+			start: securityv1alpha1.CertificationStatusCertified,
+			info:  repoInfo(false, false),
+			want:  securityv1alpha1.CertificationStatusCertified,
+		},
+		{
+			name:  "a verified publisher promotes",
+			start: securityv1alpha1.CertificationStatusNotCertified,
+			info:  repoInfo(false, true),
+			want:  securityv1alpha1.CertificationStatusVerified,
+		},
+		{
+			name:  "an official image promotes",
+			start: securityv1alpha1.CertificationStatusVerified,
+			info:  repoInfo(true, false),
+			want:  securityv1alpha1.CertificationStatusOfficial,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := &securityv1alpha1.ImageCertificationInfo{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{CertificationStatus: tt.start},
+			}
+
+			(&PodReconciler{}).updateCRWithDockerHubData(cr, tt.info)
+
+			if got := cr.Status.CertificationStatus; got != tt.want {
+				t.Errorf("CertificationStatus = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_CheckDockerHubData_DowngradesStaleTrust(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	cr := staleDockerHubCR()
+	cr.Status.CertificationStatus = securityv1alpha1.CertificationStatusVerified
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	// A successful lookup that reports neither flag: the badge is gone.
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		DockerHubClient: &stubDockerHubClient{info: &dockerhub.RepositoryInfo{
+			IsOfficial:          false,
+			IsVerifiedPublisher: false,
+			LastUpdated:         time.Now(),
+		}},
+	}
+
+	ref := &image.Reference{Registry: RegistryDockerHub, Repository: testDockerHubRepository, Digest: testDigest}
+	if err := reconciler.checkDockerHubData(ctx, testDockerHubCRName, ref); err != nil {
+		t.Fatalf("checkDockerHubData() error = %v, want nil", err)
+	}
+
+	var updatedCR securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testDockerHubCRName}, &updatedCR); err != nil {
+		t.Fatalf("failed to get ImageCertificationInfo: %v", err)
+	}
+
+	if got := updatedCR.Status.CertificationStatus; got != securityv1alpha1.CertificationStatusNotCertified {
+		t.Errorf("CertificationStatus = %v, want NotCertified after the badge disappeared", got)
+	}
+	if updatedCR.Status.DockerHubData == nil {
+		t.Fatal("DockerHubData = nil, want the refreshed payload")
+	}
+	if updatedCR.Status.DockerHubData.IsVerifiedPublisher {
+		t.Error("IsVerifiedPublisher = true, want false")
+	}
+}
