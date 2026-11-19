@@ -16,8 +16,8 @@ The operator exposes metrics at the `/metrics` endpoint. All metrics use the `im
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `imagecertinfo_pyxis_requests_total` | Counter | `status`, `endpoint` | Total Pyxis API requests |
-| `imagecertinfo_pyxis_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
+| `imagecertinfo_pyxis_requests_total` | Counter | `status`, `endpoint` | Total Pyxis API requests. `status` is `success`, `not_found`, or `error`; `endpoint` is `image`, `repository`, or `vulnerabilities` |
+| `imagecertinfo_pyxis_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds (`image`, `repository`, `vulnerabilities`) |
 | `imagecertinfo_pyxis_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
 | `imagecertinfo_pyxis_cache_entries` | Gauge | - | Number of entries resident in the cache |
 

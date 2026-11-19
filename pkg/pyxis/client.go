@@ -19,6 +19,7 @@ package pyxis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -277,6 +278,91 @@ func (c *HTTPClient) fetchOnce(ctx context.Context, requestURL string) fetchResu
 	return fetchResult{response: &pagedResp.Data[0]}
 }
 
+// errNotFound is returned by doJSONWithRetry when the API answers 404, so a
+// best-effort caller can tell "the resource does not exist" from "the request
+// failed".
+var errNotFound = errors.New("pyxis: resource not found")
+
+// doJSONWithRetry performs a GET and decodes the JSON body into out, using the
+// same retry policy as fetchAndParseResponse: transport failures and 429/5xx
+// responses are retried with jittered exponential backoff, everything else is
+// returned immediately. A 404 yields errNotFound.
+func (c *HTTPClient) doJSONWithRetry(ctx context.Context, requestURL string, out any) error {
+	for attempt := range maxRetryAttempts {
+		retryAfter, retryable, err := c.doJSONOnce(ctx, requestURL, out)
+		if err == nil || !retryable {
+			return err
+		}
+		if attempt == maxRetryAttempts-1 {
+			return err
+		}
+		if sleepErr := sleepWithContext(ctx, retryDelay(attempt, retryAfter)); sleepErr != nil {
+			return sleepErr
+		}
+	}
+
+	return nil
+}
+
+// doJSONOnce performs one GET attempt and reports whether another is worth
+// trying. On success the body has been decoded into out.
+func (c *HTTPClient) doJSONOnce(ctx context.Context, requestURL string, out any) (time.Duration, bool, error) {
+	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, false, fmt.Errorf("failed to execute request: %w", ctxErr)
+		}
+
+		return 0, true, fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Continue processing.
+	case http.StatusNotFound:
+		return 0, false, errNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return 0, false, fmt.Errorf("authentication failed: %s", resp.Status)
+	default:
+		body := httpx.ReadErrorBody(resp.Body, c.httpClient.MaxErrorBodyBytes)
+
+		return parseRetryAfter(resp.Header.Get("Retry-After")),
+			isRetryableStatus(resp.StatusCode),
+			fmt.Errorf("unexpected response status %s: %s", resp.Status, body)
+	}
+
+	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return 0, false, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return 0, false, nil
+}
+
+// recordPyxisRequest records the outcome of one best-effort Pyxis request:
+// a 404 is "not_found", any other error is "error", and everything else is
+// "success".
+func recordPyxisRequest(endpoint string, err error, durationSeconds float64) {
+	switch {
+	case errors.Is(err, errNotFound):
+		metrics.RecordPyxisRequest("not_found", endpoint, durationSeconds)
+	case err != nil:
+		metrics.RecordPyxisRequest("error", endpoint, durationSeconds)
+	default:
+		metrics.RecordPyxisRequest("success", endpoint, durationSeconds)
+	}
+}
+
 // isRetryableStatus reports whether a status code warrants another attempt.
 func isRetryableStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
@@ -504,8 +590,12 @@ func (c *HTTPClient) getRepositoryInfo(ctx context.Context, registry, repository
 	encodedRepo := url.PathEscape(repository)
 	requestURL := fmt.Sprintf("%s/repositories/registry/%s/repository/%s", c.baseURL, registry, encodedRepo)
 
+	start := time.Now()
 	var repoResp PyxisContainerRepository
-	if err := c.httpClient.DoJSON(ctx, http.MethodGet, requestURL, nil, &repoResp); err != nil {
+	err := c.doJSONWithRetry(ctx, requestURL, &repoResp)
+	recordPyxisRequest("repository", err, time.Since(start).Seconds())
+
+	if err != nil {
 		return nil
 	}
 
@@ -529,14 +619,12 @@ func (c *HTTPClient) getVulnerabilitiesWithAdvisories(ctx context.Context, image
 	requestURL := fmt.Sprintf("%s/images/id/%s/vulnerabilities", c.baseURL, imageID)
 
 	var vulnResp PyxisVulnerabilitiesResponse
-	err := c.httpClient.DoJSON(ctx, http.MethodGet, requestURL, nil, &vulnResp)
-	duration := time.Since(start).Seconds()
+	err := c.doJSONWithRetry(ctx, requestURL, &vulnResp)
+	recordPyxisRequest("vulnerabilities", err, time.Since(start).Seconds())
+
 	if err != nil {
-		metrics.RecordPyxisRequest("error", "vulnerabilities", duration)
 		return nil, nil
 	}
-
-	metrics.RecordPyxisRequest("success", "vulnerabilities", duration)
 
 	// Extract CVE IDs and advisory IDs
 	var cves []string
