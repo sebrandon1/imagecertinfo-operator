@@ -142,7 +142,7 @@ func main() {
 	flag.IntVar(&pyxisRateBurst, "pyxis-rate-burst", pyxis.DefaultRateBurst,
 		"Burst size for Pyxis API rate limiting (default 20)")
 	flag.DurationVar(&pyxisRefreshInterval, "pyxis-refresh-interval", 24*time.Hour,
-		"Interval for periodic refresh of Pyxis certification data (0 to disable, default 24h)")
+		"Interval for periodic enrichment of Red Hat, Docker Hub, and Quay.io images (0 to disable, default 24h)")
 
 	// Docker Hub flags
 	flag.BoolVar(&dockerHubEnabled, "dockerhub-enabled", true,
@@ -419,9 +419,11 @@ func main() {
 		setupLog.Info("Quay.io client is not cache-wrapped, cache cleanup is inactive")
 	}
 
-	// Start the periodic refresh loop for Pyxis data
-	if pyxisRefreshInterval > 0 && pyxisClient != nil {
-		setupLog.Info("Starting Pyxis refresh loop", "interval", pyxisRefreshInterval)
+	// Start the periodic refresh loop. It refreshes CRs for every registry, so
+	// it runs whenever any enrichment client is enabled, not just Pyxis.
+	if refreshLoopEnabled(pyxisRefreshInterval, pyxisClient, dockerHubClient, quayClient) {
+		setupLog.Info("Starting periodic refresh loop", "interval", pyxisRefreshInterval,
+			"pyxis", pyxisClient != nil, "dockerhub", dockerHubClient != nil, "quay", quayClient != nil)
 		addRunnable(mgr, "refresh loop", func(ctx context.Context) error {
 			return podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
 		})
@@ -496,6 +498,24 @@ func cacheCleanupRunnableFor(c any, interval time.Duration) (cacheCleanupRunnabl
 	}
 
 	return cacheCleanupRunnable{starter: starter, interval: interval}, true
+}
+
+// refreshLoopEnabled reports whether the periodic refresh loop should run. The
+// loop refreshes Red Hat, Docker Hub and Quay.io CRs, so a single enabled
+// enrichment client is enough; gating it on Pyxis alone would silently stop
+// refreshing the other registries when Pyxis is disabled.
+func refreshLoopEnabled(interval time.Duration, clients ...any) bool {
+	if interval <= 0 {
+		return false
+	}
+
+	for _, c := range clients {
+		if c != nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 // addCacheCleanup registers the periodic cache cleanup loop for a cache-wrapped

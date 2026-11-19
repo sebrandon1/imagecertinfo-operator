@@ -9,7 +9,7 @@ The operator can be configured via command-line flags:
 | `--pyxis-enabled` | Enable Red Hat Pyxis API integration | `true` |
 | `--pyxis-base-url` | Base URL for the Pyxis API | `https://catalog.redhat.com/api/containers/v1` |
 | `--pyxis-api-key` | Optional API key for higher Pyxis rate limits (can also use `PYXIS_API_KEY` env var) | (none) |
-| `--pyxis-refresh-interval` | Interval for periodic refresh of Pyxis certification data (`0` to disable). An image is not re-queried more than once per half interval (minimum 1m) | `24h` |
+| `--pyxis-refresh-interval` | Interval for periodic enrichment of Red Hat, Docker Hub, and Quay.io images (`0` to disable). An image is not re-queried more than once per half interval (minimum 1m) | `24h` |
 | `--pyxis-cache-ttl` | TTL for cached Pyxis API responses | `1h` |
 | `--pyxis-cache-max-entries` | Maximum number of cached Pyxis responses (`0` or less for unlimited) | `10000` |
 | `--pyxis-rate-limit` | Pyxis API requests per second | `10` |
@@ -102,11 +102,11 @@ Failed enrichments are retried with exponential backoff up to 5 times before the
 image is left for the next refresh cycle. Only the leader replica runs the
 cleanup loop, the refresh loop, and the enrichment workers.
 
-The periodic refresh loop starts only when `--pyxis-refresh-interval` is greater than
-zero **and** the Pyxis client is enabled. Although the flag is named after Pyxis,
-the loop refreshes Docker Hub and Quay.io CRs as well, so `--pyxis-enabled=false`
-also disables periodic refresh for those registries — only the initial enrichment and
-the retry queue keep them current.
+The periodic refresh loop starts when `--pyxis-refresh-interval` is greater than zero
+**and** at least one enrichment client is enabled — Pyxis, Docker Hub, or Quay.io. The
+flag is named after Pyxis for historical reasons only: the loop refreshes CRs for all
+three registries and skips any registry whose client is disabled. Disabling Pyxis
+therefore no longer stops refresh for Docker Hub and Quay.io images.
 
 ## Metrics and Health
 
