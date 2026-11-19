@@ -60,6 +60,8 @@ const (
 	testRepository  = "ubi8/ubi"
 	testExistingPod = "existing-pod"
 	testPublisher   = "Red Hat, Inc."
+	testContainer1  = "container1"
+	testContainer2  = "container2"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -408,12 +410,12 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 				{
 					Namespace: testNamespace,
 					Name:      testExistingPod,
-					Container: "container1",
+					Container: testContainer1,
 				},
 				{
 					Namespace: testNamespace,
 					Name:      "deleted-pod",
-					Container: "container2",
+					Container: testContainer2,
 				},
 			},
 			FirstSeenAt: &now,
@@ -448,6 +450,168 @@ func TestPodReconciler_CleanupStaleReferences(t *testing.T) {
 	}
 	if cr.Status.PodReferences[0].Name != testExistingPod {
 		t.Errorf("Remaining PodReference.Name = %v, want existing-pod", cr.Status.PodReferences[0].Name)
+	}
+}
+
+func TestPodReconciler_CleanupStaleReferences_AllPodsGone(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Name: testCRName,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			PodReferences: []securityv1alpha1.PodReference{
+				{Namespace: testNamespace, Name: "gone-pod-1", Container: testContainer1},
+				{Namespace: testNamespace, Name: "gone-pod-2", Container: testContainer2},
+			},
+			FirstSeenAt: &now,
+			LastSeenAt:  &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	if err := reconciler.CleanupStaleReferences(ctx); err != nil {
+		t.Fatalf("CleanupStaleReferences() error = %v", err)
+	}
+
+	var got securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &got); err != nil {
+		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
+	}
+	if len(got.Status.PodReferences) != 0 {
+		t.Errorf("PodReferences count = %v, want 0", len(got.Status.PodReferences))
+	}
+}
+
+func TestPodReconciler_CleanupStaleReferences_SameNameDifferentNamespace(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	// A pod with the referenced name exists, but in another namespace: the
+	// reference must still be treated as stale.
+	podElsewhere := &corev1.Pod{
+		Name:      "shared-name-pod",
+		Namespace: "other-namespace",
+		Status:    corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Name: testCRName,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			PodReferences: []securityv1alpha1.PodReference{
+				{Namespace: testNamespace, Name: "shared-name-pod", Container: testContainer1},
+			},
+			FirstSeenAt: &now,
+			LastSeenAt:  &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr, podElsewhere).
+		WithStatusSubresource(cr).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	if err := reconciler.CleanupStaleReferences(ctx); err != nil {
+		t.Fatalf("CleanupStaleReferences() error = %v", err)
+	}
+
+	var got securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &got); err != nil {
+		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
+	}
+	if len(got.Status.PodReferences) != 0 {
+		t.Errorf("PodReferences count = %v, want 0", len(got.Status.PodReferences))
+	}
+}
+
+func TestPodReconciler_CleanupStaleReferences_PodListFailureLeavesCRsAlone(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	now := metav1.Now()
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Name: testCRName,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			PodReferences: []securityv1alpha1.PodReference{
+				{Namespace: testNamespace, Name: "gone-pod", Container: testContainer1},
+			},
+			FirstSeenAt: &now,
+			LastSeenAt:  &now,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
+				opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.PodList); ok {
+					return errors.New("simulated pod list failure")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &PodReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	if err := reconciler.CleanupStaleReferences(ctx); err == nil {
+		t.Fatal("CleanupStaleReferences() error = nil, want the pod list failure")
+	}
+
+	var got securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &got); err != nil {
+		t.Fatalf("Failed to get ImageCertificationInfo: %v", err)
+	}
+	if len(got.Status.PodReferences) != 1 {
+		t.Errorf("PodReferences count = %v, want the reference untouched", len(got.Status.PodReferences))
 	}
 }
 
