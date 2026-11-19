@@ -935,10 +935,16 @@ func podImageSetChanged(oldPod, newPod *corev1.Pod) bool {
 	return !slices.Equal(podImageIDs(oldPod), podImageIDs(newPod))
 }
 
-// podImageIDs returns the sorted image IDs reported by the pod's containers.
+// podImageIDs returns the sorted image IDs reported by the pod's containers,
+// including init containers. It must match the status lists that Reconcile
+// processes, otherwise an update that only adds an init container image is
+// filtered out and the image is never discovered.
 func podImageIDs(pod *corev1.Pod) []string {
-	ids := make([]string, 0, len(pod.Status.ContainerStatuses))
+	ids := make([]string, 0, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
 	for _, status := range pod.Status.ContainerStatuses {
+		ids = append(ids, status.ImageID)
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
 		ids = append(ids, status.ImageID)
 	}
 	slices.Sort(ids)
