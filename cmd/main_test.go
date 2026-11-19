@@ -106,3 +106,31 @@ func TestCacheCleanupRunnable_Start(t *testing.T) {
 		t.Error("cleanup loop did not observe cancellation")
 	}
 }
+
+func TestRefreshLoopEnabled(t *testing.T) {
+	client := &fakeCachedClient{}
+	var nilClient any
+
+	tests := []struct {
+		name     string
+		interval time.Duration
+		clients  []any
+		want     bool
+	}{
+		{name: "pyxis only", interval: time.Hour, clients: []any{client, nilClient, nilClient}, want: true},
+		{name: "dockerhub only", interval: time.Hour, clients: []any{nilClient, client, nilClient}, want: true},
+		{name: "quay only", interval: time.Hour, clients: []any{nilClient, nilClient, client}, want: true},
+		{name: "all clients nil", interval: time.Hour, clients: []any{nilClient, nilClient, nilClient}, want: false},
+		{name: "zero interval with a client", interval: 0, clients: []any{client}, want: false},
+		{name: "negative interval with a client", interval: -time.Hour, clients: []any{client}, want: false},
+		{name: "no clients passed", interval: time.Hour, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := refreshLoopEnabled(tt.interval, tt.clients...); got != tt.want {
+				t.Errorf("refreshLoopEnabled(%v, %d clients) = %v, want %v", tt.interval, len(tt.clients), got, tt.want)
+			}
+		})
+	}
+}
