@@ -341,9 +341,13 @@ type MockPyxisClient struct {
 	CertData *pyxis.CertificationData
 	Err      error
 	Healthy  bool
+
+	// Calls counts GetImageCertification invocations.
+	Calls int
 }
 
 func (m *MockPyxisClient) GetImageCertification(ctx context.Context, registry, repository, digest string) (*pyxis.CertificationData, error) {
+	m.Calls++
 	return m.CertData, m.Err
 }
 
@@ -555,7 +559,7 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 	}
 
 	// Run refresh
-	err := reconciler.RefreshAllImages(ctx)
+	err := reconciler.RefreshAllImages(ctx, time.Hour)
 	if err != nil {
 		t.Fatalf("RefreshAllImages() error = %v", err)
 	}
@@ -602,6 +606,124 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 		if timeDiff > time.Second {
 			t.Errorf("Recently checked CR should not be refreshed within the hour, time diff: %v", timeDiff)
 		}
+	}
+}
+
+func TestPodReconciler_RefreshAllImages_StaggerScalesWithMinRefreshAge(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	recentlyChecked := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+	staleChecked := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+
+	newCR := func(name string, checked metav1.Time) *securityv1alpha1.ImageCertificationInfo {
+		cr := &securityv1alpha1.ImageCertificationInfo{
+			Spec: securityv1alpha1.ImageCertificationInfoSpec{
+				ImageDigest:        testDigest,
+				FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+				Registry:           testRegistry,
+				Repository:         testRepository,
+			},
+			Status: securityv1alpha1.ImageCertificationInfoStatus{
+				RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+				CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+				LastPyxisCheckAt:    &checked,
+			},
+		}
+		cr.Name = name
+
+		return cr
+	}
+
+	recentCR := newCR("registry.redhat.io.ubi8.recent", recentlyChecked)
+	staleCR := newCR("registry.redhat.io.ubi8.stale", staleChecked)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(recentCR, staleCR).
+		WithStatusSubresource(recentCR, staleCR).
+		Build()
+
+	mockPyxis := &MockPyxisClient{
+		CertData: &pyxis.CertificationData{
+			Publisher:   testPublisher,
+			HealthIndex: "A",
+		},
+		Healthy: true,
+	}
+
+	reconciler := &PodReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		PyxisClient: mockPyxis,
+	}
+
+	if err := reconciler.RefreshAllImages(ctx, 2*time.Minute); err != nil {
+		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+
+	// Only the CR last checked 3 minutes ago is older than the 2-minute stagger.
+	if mockPyxis.Calls != 1 {
+		t.Errorf("Pyxis calls = %d, want 1 (only the stale CR)", mockPyxis.Calls)
+	}
+
+	var recentAfter, staleAfter securityv1alpha1.ImageCertificationInfo
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: recentCR.Name}, &recentAfter); err != nil {
+		t.Fatalf("Failed to get recently checked CR: %v", err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: staleCR.Name}, &staleAfter); err != nil {
+		t.Fatalf("Failed to get stale CR: %v", err)
+	}
+
+	if !staleAfter.Status.LastPyxisCheckAt.After(staleChecked.Time) {
+		t.Error("stale CR should have been refreshed")
+	}
+	// LastPyxisCheckAt round-trips through metav1.Time's RFC3339 encoding,
+	// which drops sub-second precision, so compare whole seconds.
+	if recentAfter.Status.LastPyxisCheckAt.Unix() != recentlyChecked.Unix() {
+		t.Errorf("recently checked CR should not have been refreshed, LastPyxisCheckAt = %v",
+			recentAfter.Status.LastPyxisCheckAt)
+	}
+}
+
+func TestPodReconciler_RefreshAllImages_NonPositiveMinRefreshAgeRefreshesEverything(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	justChecked := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+			LastPyxisCheckAt:    &justChecked,
+		},
+	}
+	cr.Name = "registry.redhat.io.ubi8.justchecked"
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cr).
+		WithStatusSubresource(cr).
+		Build()
+
+	mockPyxis := &MockPyxisClient{
+		CertData: &pyxis.CertificationData{Publisher: testPublisher, HealthIndex: "A"},
+		Healthy:  true,
+	}
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, PyxisClient: mockPyxis}
+
+	if err := reconciler.RefreshAllImages(ctx, 0); err != nil {
+		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+	if mockPyxis.Calls != 1 {
+		t.Errorf("Pyxis calls = %d, want 1 with staggering disabled", mockPyxis.Calls)
 	}
 }
 
