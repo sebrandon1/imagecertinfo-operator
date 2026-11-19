@@ -139,3 +139,58 @@ func TestNewCachedRateLimitedClient_AppliesMaxEntries(t *testing.T) {
 		t.Errorf("Size() = %d, want 3", got)
 	}
 }
+
+func TestCachedClient_StartCleanupLoop_NonPositiveInterval(t *testing.T) {
+	client := NewCachedRateLimitedClient(&stubClient{}, time.Hour, 100, 100, 10)
+
+	cached, ok := client.(*CachedClient)
+	if !ok {
+		t.Fatalf("NewCachedRateLimitedClient() = %T, want *CachedClient", client)
+	}
+
+	if _, err := cached.GetRepositoryInfo(context.Background(), "library", "repo"); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+
+	ctx := t.Context()
+
+	// time.NewTicker panics on a non-positive duration; the guard must return
+	// without starting a ticker.
+	cached.StartCleanupLoop(ctx, 0)
+	cached.StartCleanupLoop(ctx, -time.Second)
+
+	if got := cached.Size(); got != 1 {
+		t.Errorf("Size() = %d, want 1: a non-positive interval must not prune the cache", got)
+	}
+}
+
+func TestCachedClient_StartCleanupLoop_PrunesExpiredEntries(t *testing.T) {
+	client := NewCachedRateLimitedClient(&stubClient{}, time.Millisecond, 100, 100, 10)
+
+	cached, ok := client.(*CachedClient)
+	if !ok {
+		t.Fatalf("NewCachedRateLimitedClient() = %T, want *CachedClient", client)
+	}
+
+	if _, err := cached.GetRepositoryInfo(t.Context(), "library", "repo"); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+	if got := cached.Size(); got != 1 {
+		t.Fatalf("Size() = %d, want 1 after the miss was cached", got)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	cached.StartCleanupLoop(ctx, time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cached.Size() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("Size() = %d, want 0 after the cleanup loop pruned the expired entry", cached.Size())
+}

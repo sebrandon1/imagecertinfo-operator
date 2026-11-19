@@ -1023,6 +1023,12 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 // cancelled. It blocks, so it can be registered as a manager Runnable: the
 // manager then starts it only on the leader and cancels it on shutdown.
 func (r *PodReconciler) StartCleanupLoop(ctx context.Context, interval time.Duration) error {
+	// The interval is validated at startup; this guards programmatic callers
+	// because time.NewTicker panics on a non-positive duration.
+	if interval <= 0 {
+		return nil
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

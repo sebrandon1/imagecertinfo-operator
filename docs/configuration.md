@@ -10,7 +10,7 @@ The operator can be configured via command-line flags:
 | `--pyxis-base-url` | Base URL for the Pyxis API | `https://catalog.redhat.com/api/containers/v1` |
 | `--pyxis-api-key` | Optional API key for higher Pyxis rate limits (can also use `PYXIS_API_KEY` env var) | (none) |
 | `--pyxis-refresh-interval` | Interval for periodic enrichment of Red Hat, Docker Hub, and Quay.io images (`0` to disable). An image is not re-queried more than once per half interval (minimum 1m) | `24h` |
-| `--pyxis-cache-ttl` | TTL for cached Pyxis API responses | `1h` |
+| `--pyxis-cache-ttl` | TTL for cached Pyxis API responses. Must be greater than zero; use `--pyxis-enabled=false` to disable enrichment | `1h` |
 | `--pyxis-cache-max-entries` | Maximum number of cached Pyxis responses (`0` or less for unlimited) | `10000` |
 | `--pyxis-rate-limit` | Pyxis API requests per second | `10` |
 | `--pyxis-rate-burst` | Burst size for Pyxis rate limiting | `20` |
@@ -55,7 +55,7 @@ Priority order: `--pyxis-api-key` flag → `PYXIS_API_KEY` env var → Secret.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--dockerhub-enabled` | Enable Docker Hub metadata enrichment for `docker.io` images | `true` |
-| `--dockerhub-cache-ttl` | TTL for cached Docker Hub API responses | `1h` |
+| `--dockerhub-cache-ttl` | TTL for cached Docker Hub API responses. Must be greater than zero; use `--dockerhub-enabled=false` to disable enrichment | `1h` |
 | `--dockerhub-cache-max-entries` | Maximum number of cached Docker Hub responses (`0` or less for unlimited) | `10000` |
 | `--dockerhub-rate-limit` | Docker Hub API requests per second | `5` |
 | `--dockerhub-rate-burst` | Burst size for Docker Hub rate limiting | `10` |
@@ -65,7 +65,7 @@ Priority order: `--pyxis-api-key` flag → `PYXIS_API_KEY` env var → Secret.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--quay-enabled` | Enable Quay.io metadata enrichment for `quay.io` images | `true` |
-| `--quay-cache-ttl` | TTL for cached Quay.io repository responses | `1h` |
+| `--quay-cache-ttl` | TTL for cached Quay.io repository responses. Must be greater than zero; use `--quay-enabled=false` to disable enrichment | `1h` |
 | `--quay-rate-limit` | Quay.io API requests per second | `5` |
 | `--quay-rate-burst` | Burst size for Quay.io rate limiting | `10` |
 
@@ -95,11 +95,18 @@ never enriched.
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--cleanup-interval` | Interval for cleaning up stale pod references | `5m` |
+| `--cleanup-interval` | Interval for cleaning up stale pod references. Must be greater than zero | `5m` |
 | `--enrichment-workers` | Number of concurrent workers enriching newly discovered images | `4` |
 
 Failed enrichments are retried with exponential backoff up to 5 times before the
-image is left for the next refresh cycle. Only the leader replica runs the
+image is left for the next refresh cycle.
+
+`--cleanup-interval` and the three cache TTL flags are validated at startup: a
+value of zero or less exits non-zero with a message naming the flag, instead of
+panicking the loop that would have received it. Each loop also returns without
+starting a ticker when handed a non-positive interval, so a programmatic caller
+cannot crash the operator either. Only `--pyxis-refresh-interval` accepts `0`,
+which disables the refresh loop. Only the leader replica runs the
 cleanup loop, the refresh loop, and the enrichment workers.
 
 The periodic refresh loop starts when `--pyxis-refresh-interval` is greater than zero

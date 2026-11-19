@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,6 +131,75 @@ func TestRefreshLoopEnabled(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := refreshLoopEnabled(tt.interval, tt.clients...); got != tt.want {
 				t.Errorf("refreshLoopEnabled(%v, %d clients) = %v, want %v", tt.interval, len(tt.clients), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateIntervals(t *testing.T) {
+	const (
+		cleanup = 5 * time.Minute
+		ttl     = time.Hour
+	)
+
+	tests := []struct {
+		name    string
+		cleanup time.Duration
+		pyxis   time.Duration
+		docker  time.Duration
+		quay    time.Duration
+		refresh time.Duration
+		wantErr string
+	}{
+		{
+			name:    "defaults are valid",
+			cleanup: cleanup, pyxis: ttl, docker: ttl, quay: ttl, refresh: 24 * time.Hour,
+		},
+		{
+			name:    "zero refresh interval is valid (disabled)",
+			cleanup: cleanup, pyxis: ttl, docker: ttl, quay: ttl, refresh: 0,
+		},
+		{
+			name:    "zero cleanup interval is rejected",
+			cleanup: 0, pyxis: ttl, docker: ttl, quay: ttl, refresh: time.Hour,
+			wantErr: "--cleanup-interval",
+		},
+		{
+			name:    "negative pyxis cache TTL is rejected",
+			cleanup: cleanup, pyxis: -time.Hour, docker: ttl, quay: ttl, refresh: time.Hour,
+			wantErr: "--pyxis-cache-ttl",
+		},
+		{
+			name:    "zero dockerhub cache TTL is rejected",
+			cleanup: cleanup, pyxis: ttl, docker: 0, quay: ttl, refresh: time.Hour,
+			wantErr: "--dockerhub-cache-ttl",
+		},
+		{
+			name:    "zero quay cache TTL is rejected",
+			cleanup: cleanup, pyxis: ttl, docker: ttl, quay: 0, refresh: time.Hour,
+			wantErr: "--quay-cache-ttl",
+		},
+		{
+			name:    "negative refresh interval is rejected",
+			cleanup: cleanup, pyxis: ttl, docker: ttl, quay: ttl, refresh: -time.Hour,
+			wantErr: "--pyxis-refresh-interval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateIntervals(tt.cleanup, tt.pyxis, tt.docker, tt.quay, tt.refresh)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateIntervals() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateIntervals() = nil, want an error naming %s", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("validateIntervals() error = %q, want it to name %s", err, tt.wantErr)
 			}
 		})
 	}
