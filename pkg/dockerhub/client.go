@@ -150,11 +150,20 @@ func (c *HTTPClient) GetRepositoryInfo(
 		Description: repoResp.Description,
 	}
 
-	// Check for verified publisher status
-	// Verified publishers have specific namespace properties
-	// We'll check this via an additional API call if needed
 	if !info.IsOfficial {
-		info.IsVerifiedPublisher = c.checkVerifiedPublisher(ctx, namespace)
+		// A failed /orgs lookup must not fabricate a negative trust result: the
+		// caller keeps the previous enrichment and retries instead.
+		orgsStart := time.Now()
+		verified, err := c.checkVerifiedPublisher(ctx, namespace)
+		orgsDuration := time.Since(orgsStart).Seconds()
+
+		if err != nil {
+			metrics.RecordDockerHubRequest("error", "orgs", orgsDuration)
+			return nil, err
+		}
+
+		metrics.RecordDockerHubRequest("success", "orgs", orgsDuration)
+		info.IsVerifiedPublisher = verified
 	}
 
 	return info, nil
@@ -313,8 +322,10 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 // checkVerifiedPublisher checks if a namespace belongs to a Docker Verified Publisher.
-// This uses the orgs API endpoint which returns a "badge" field.
-func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace string) bool {
+// This uses the orgs API endpoint which returns a "badge" field. An error means
+// the answer is unknown, not that the namespace is unverified, so the caller can
+// retry instead of recording a false negative.
+func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace string) (bool, error) {
 	log := ctrl.Log.WithName("dockerhub")
 	requestURL := fmt.Sprintf("%s/orgs/%s", c.baseURL, namespace)
 
@@ -322,40 +333,44 @@ func (c *HTTPClient) checkVerifiedPublisher(ctx context.Context, namespace strin
 
 	req, err := c.httpClient.NewRequest(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		log.V(1).Info("failed to create request", "namespace", namespace, "error", err)
-		return false
+		return false, fmt.Errorf("failed to create orgs request: %w", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.V(1).Info("failed to execute request", "namespace", namespace, "error", err)
-		return false
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("failed to execute orgs request: %w", ctxErr)
+		}
+
+		return false, fmt.Errorf("failed to execute orgs request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		// No org page at all means no badge; that is an answer, not a failure.
+		log.V(1).Info("namespace has no org page", "namespace", namespace)
+
+		return false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		log.V(1).Info("non-OK status from orgs endpoint",
-			"namespace", namespace, "status", resp.StatusCode)
-		return false
+		return false, fmt.Errorf("unexpected response status from orgs endpoint: %s", resp.Status)
 	}
 
 	body, err := httpx.ReadLimited(resp.Body, c.httpClient.MaxResponseBytes)
 	if err != nil {
-		log.V(1).Info("failed to read response body", "namespace", namespace, "error", err)
-		return false
+		return false, fmt.Errorf("failed to read orgs response body: %w", err)
 	}
 
 	var orgResp DockerHubOrgResponse
 	if err := json.Unmarshal(body, &orgResp); err != nil {
-		log.V(1).Info("failed to parse response", "namespace", namespace, "error", err)
-		return false
+		return false, fmt.Errorf("failed to parse orgs response: %w", err)
 	}
 
 	isVerified := orgResp.Badge == "verified_publisher"
 	log.V(1).Info("verified publisher check result",
 		"namespace", namespace, "badge", orgResp.Badge, "isVerified", isVerified)
 
-	return isVerified
+	return isVerified, nil
 }
 
 // IsHealthy checks if the Docker Hub API is accessible

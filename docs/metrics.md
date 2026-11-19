@@ -80,7 +80,7 @@ sum(rate(imagecertinfo_reconcile_total[5m])) * 100
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `imagecertinfo_dockerhub_requests_total` | Counter | `status`, `endpoint` | Total Docker Hub API requests |
+| `imagecertinfo_dockerhub_requests_total` | Counter | `status`, `endpoint` | Total Docker Hub API requests. `status` is `success`, `not_found`, or `error`; `endpoint` is `repository` or `orgs` |
 | `imagecertinfo_dockerhub_request_duration_seconds` | Histogram | `endpoint` | Request duration in seconds |
 | `imagecertinfo_dockerhub_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
 | `imagecertinfo_dockerhub_cache_entries` | Gauge | - | Number of entries resident in the cache |

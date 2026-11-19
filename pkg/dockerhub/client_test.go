@@ -21,9 +21,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 )
 
 const (
@@ -31,6 +36,8 @@ const (
 	testRepoNginx  = "nginx"
 	testNSBitnami  = "bitnami"
 	testNSSomeuser = "someuser"
+
+	testVerifiedBadge = "verified_publisher"
 )
 
 func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
@@ -80,7 +87,7 @@ func TestHTTPClient_GetRepositoryInfo(t *testing.T) {
 			},
 			orgResponse: &DockerHubOrgResponse{
 				Orgname: testNSBitnami,
-				Badge:   "verified_publisher",
+				Badge:   testVerifiedBadge,
 			},
 			serverStatus:  http.StatusOK,
 			wantErr:       false,
@@ -491,5 +498,119 @@ func TestHTTPClient_GetRepositoryInfo_RetriesTransportErrors(t *testing.T) {
 	}
 	if got := attempts.Load(); got != maxRetryAttempts {
 		t.Errorf("attempts = %d, want %d", got, maxRetryAttempts)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_OrgsEndpoint(t *testing.T) {
+	tests := []struct {
+		name         string
+		orgStatus    int
+		badge        string
+		wantVerified bool
+		wantErr      bool
+	}{
+		{name: "verified badge", orgStatus: http.StatusOK, badge: testVerifiedBadge, wantVerified: true},
+		{name: "no badge", orgStatus: http.StatusOK, badge: "", wantVerified: false},
+		{name: "missing org page is not an error", orgStatus: http.StatusNotFound, wantVerified: false},
+		{name: "orgs server error is retryable", orgStatus: http.StatusInternalServerError, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/orgs/") {
+					if tt.orgStatus == http.StatusOK {
+						_ = json.NewEncoder(w).Encode(&DockerHubOrgResponse{
+							Orgname: testNSSomeuser,
+							Badge:   tt.badge,
+						})
+					} else {
+						w.WriteHeader(tt.orgStatus)
+					}
+					return
+				}
+
+				_ = json.NewEncoder(w).Encode(&DockerHubRepositoryResponse{
+					Namespace: testNSSomeuser,
+					Name:      testRepoNginx,
+					PullCount: 100,
+				})
+			}))
+			defer server.Close()
+
+			client := NewHTTPClient(WithBaseURL(server.URL))
+
+			info, err := client.GetRepositoryInfo(context.Background(), testNSSomeuser, testRepoNginx)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("GetRepositoryInfo() error = nil, want an error so the enrichment is retried")
+				}
+				if info != nil {
+					t.Errorf("GetRepositoryInfo() = %+v, want nil on error", info)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("GetRepositoryInfo() error = %v, want nil", err)
+			}
+			if info == nil {
+				t.Fatal("GetRepositoryInfo() = nil, want a result")
+			}
+			if info.IsVerifiedPublisher != tt.wantVerified {
+				t.Errorf("IsVerifiedPublisher = %v, want %v", info.IsVerifiedPublisher, tt.wantVerified)
+			}
+		})
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_RecordsOrgsMetric(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/orgs/") {
+			_ = json.NewEncoder(w).Encode(&DockerHubOrgResponse{Badge: testVerifiedBadge})
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(&DockerHubRepositoryResponse{Namespace: testNSSomeuser, Name: testRepoNginx})
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), testNSSomeuser, testRepoNginx); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+
+	if got := testutil.ToFloat64(metrics.DockerHubRequestsTotal.WithLabelValues("success", "orgs")); got < 1 {
+		t.Errorf("dockerhub_requests_total{endpoint=\"orgs\"} = %v, want at least 1", got)
+	}
+}
+
+func TestHTTPClient_GetRepositoryInfo_OfficialImageSkipsOrgs(t *testing.T) {
+	var orgCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/orgs/") {
+			orgCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(&DockerHubRepositoryResponse{Namespace: testNSLibrary, Name: testRepoNginx})
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL))
+
+	info, err := client.GetRepositoryInfo(context.Background(), testNSLibrary, testRepoNginx)
+	if err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v, want nil: official images never query /orgs", err)
+	}
+	if !info.IsOfficial {
+		t.Error("IsOfficial = false, want true")
+	}
+	if got := orgCalls.Load(); got != 0 {
+		t.Errorf("/orgs calls = %d, want 0 for an official image", got)
 	}
 }
