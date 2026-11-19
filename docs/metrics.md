@@ -7,8 +7,8 @@ The operator exposes metrics at the `/metrics` endpoint. All metrics use the `im
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `imagecertinfo_images_total` | Gauge | `status` | Total images tracked by certification status |
-| `imagecertinfo_images_by_health` | Gauge | `grade` | Images by health grade (A-F) |
-| `imagecertinfo_vulnerabilities_total` | Gauge | `severity` | Total vulnerabilities by severity |
+| `imagecertinfo_images_by_health` | Gauge | `grade` | Images by health grade (A-F). Pyxis-only: Quay/Clair has no health grade |
+| `imagecertinfo_vulnerabilities_total` | Gauge | `severity` | Total vulnerabilities by severity, summed across Pyxis certification data and Quay/Clair scans |
 | `imagecertinfo_images_eol_within_days` | Gauge | `days` | Images approaching end-of-life |
 | `imagecertinfo_images_past_eol` | Gauge | - | Images past their EOL date |
 
@@ -61,8 +61,11 @@ that Quay is failing.
 # Percentage of certified images
 sum(imagecertinfo_images_total{status="Certified"}) / sum(imagecertinfo_images_total) * 100
 
-# Images with critical vulnerabilities
+# Images with critical vulnerabilities (Pyxis and Quay/Clair combined)
 imagecertinfo_vulnerabilities_total{severity="critical"}
+
+# Images by Pyxis health grade (excludes quay.io images)
+sum by (grade) (imagecertinfo_images_by_health)
 
 # Pyxis API cache hit rate
 sum(rate(imagecertinfo_pyxis_cache_hits_total{result="hit"}[5m])) /

@@ -158,3 +158,97 @@ func TestUpdateInventory(t *testing.T) {
 		})
 	}
 }
+
+const (
+	sevCritical  = "critical"
+	sevImportant = "important"
+	sevModerate  = "moderate"
+	sevLow       = "low"
+)
+
+func TestUpdateInventory_QuayVulnerabilities(t *testing.T) {
+	vulns := func(critical, important, moderate, low int) *securityv1alpha1.VulnerabilitySummary {
+		return &securityv1alpha1.VulnerabilitySummary{
+			Critical: critical, Important: important, Moderate: moderate, Low: low,
+		}
+	}
+	severities := []string{sevCritical, sevImportant, sevModerate, sevLow}
+
+	tests := []struct {
+		name        string
+		items       []securityv1alpha1.ImageCertificationInfo
+		want        map[string]float64
+		wantUnknown float64
+	}{
+		{
+			name: "Quay-only CR contributes counts",
+			items: []securityv1alpha1.ImageCertificationInfo{{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{
+					CertificationStatus: securityv1alpha1.CertificationStatusNotCertified,
+					QuayData:            &securityv1alpha1.QuayData{Vulnerabilities: vulns(3, 2, 1, 4)},
+				},
+			}},
+			want: map[string]float64{sevCritical: 3, sevImportant: 2, sevModerate: 1, sevLow: 4},
+		},
+		{
+			name: "CR with both sources contributes the sum",
+			items: []securityv1alpha1.ImageCertificationInfo{{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{
+					CertificationStatus: securityv1alpha1.CertificationStatusCertified,
+					PyxisData:           &securityv1alpha1.PyxisData{Vulnerabilities: vulns(2, 1, 0, 0)},
+					QuayData:            &securityv1alpha1.QuayData{Vulnerabilities: vulns(1, 1, 1, 1)},
+				},
+			}},
+			want: map[string]float64{sevCritical: 3, sevImportant: 2, sevModerate: 1, sevLow: 1},
+		},
+		{
+			name: "an unset certification status is published as Unknown",
+			items: []securityv1alpha1.ImageCertificationInfo{{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{
+					QuayData: &securityv1alpha1.QuayData{Vulnerabilities: vulns(1, 0, 0, 0)},
+				},
+			}},
+			want:        map[string]float64{sevCritical: 1, sevImportant: 0, sevModerate: 0, sevLow: 0},
+			wantUnknown: 1,
+		},
+		{
+			name: "Quay data without a vulnerability summary contributes nothing",
+			items: []securityv1alpha1.ImageCertificationInfo{{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{
+					CertificationStatus: securityv1alpha1.CertificationStatusNotCertified,
+					QuayData:            &securityv1alpha1.QuayData{SecurityScanStatus: "queued"},
+				},
+			}},
+			want: map[string]float64{sevCritical: 0, sevImportant: 0, sevModerate: 0, sevLow: 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			UpdateInventory(tt.items)
+
+			for _, severity := range severities {
+				if got := testutil.ToFloat64(VulnerabilitiesTotal.WithLabelValues(severity)); got != tt.want[severity] {
+					t.Errorf("VulnerabilitiesTotal{%s} = %v, want %v", severity, got, tt.want[severity])
+				}
+			}
+
+			if got := testutil.ToFloat64(ImagesTotal.WithLabelValues("Unknown")); got != tt.wantUnknown {
+				t.Errorf("ImagesTotal{Unknown} = %v, want %v", got, tt.wantUnknown)
+			}
+		})
+	}
+}
+
+func TestUpdateInventory_QuayDataDoesNotSetHealth(t *testing.T) {
+	UpdateInventory([]securityv1alpha1.ImageCertificationInfo{{
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			CertificationStatus: securityv1alpha1.CertificationStatusNotCertified,
+			QuayData:            &securityv1alpha1.QuayData{Vulnerabilities: &securityv1alpha1.VulnerabilitySummary{Critical: 1}},
+		},
+	}})
+
+	if got := testutil.ToFloat64(ImagesByHealth.WithLabelValues("A")); got != 0 {
+		t.Errorf("ImagesByHealth{A} = %v, want 0: the health gauge stays Pyxis-only", got)
+	}
+}

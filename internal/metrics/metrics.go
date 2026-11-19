@@ -340,6 +340,19 @@ var (
 	vulnSeverities    = []string{"critical", "important", "moderate", "low"}
 )
 
+// addVulnerabilities adds a severity breakdown to VulnerabilitiesTotal. A nil
+// summary (no scan data for that registry) contributes nothing.
+func addVulnerabilities(v *securityv1alpha1.VulnerabilitySummary) {
+	if v == nil {
+		return
+	}
+
+	VulnerabilitiesTotal.WithLabelValues("critical").Add(float64(v.Critical))
+	VulnerabilitiesTotal.WithLabelValues("important").Add(float64(v.Important))
+	VulnerabilitiesTotal.WithLabelValues("moderate").Add(float64(v.Moderate))
+	VulnerabilitiesTotal.WithLabelValues("low").Add(float64(v.Low))
+}
+
 // UpdateInventory recomputes the image inventory gauges from the current set of
 // ImageCertificationInfo resources. The gauge vectors are reset first so label
 // values for deleted images do not linger.
@@ -361,15 +374,17 @@ func UpdateInventory(items []securityv1alpha1.ImageCertificationInfo) {
 		ImagesTotal.WithLabelValues(status).Inc()
 
 		if cr.Status.PyxisData != nil {
+			// ImagesByHealth stays Pyxis-only: Quay/Clair has no health grade.
 			if grade := cr.Status.PyxisData.HealthIndex; grade != "" {
 				ImagesByHealth.WithLabelValues(grade).Inc()
 			}
-			if v := cr.Status.PyxisData.Vulnerabilities; v != nil {
-				VulnerabilitiesTotal.WithLabelValues("critical").Add(float64(v.Critical))
-				VulnerabilitiesTotal.WithLabelValues("important").Add(float64(v.Important))
-				VulnerabilitiesTotal.WithLabelValues("moderate").Add(float64(v.Moderate))
-				VulnerabilitiesTotal.WithLabelValues("low").Add(float64(v.Low))
-			}
+			addVulnerabilities(cr.Status.PyxisData.Vulnerabilities)
+		}
+
+		// Quay/Clair counts feed the same gauges. A CR normally carries one
+		// source; when both are present the honest total is their sum.
+		if cr.Status.QuayData != nil {
+			addVulnerabilities(cr.Status.QuayData.Vulnerabilities)
 		}
 
 		if cr.Status.DaysUntilEOL == nil {
