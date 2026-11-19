@@ -62,6 +62,8 @@ const (
 	testPublisher   = "Red Hat, Inc."
 	testContainer1  = "container1"
 	testContainer2  = "container2"
+	testInitName    = "init"
+	testMainImage   = "registry.redhat.io/ubi8/ubi:latest"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -83,7 +85,7 @@ func TestPodReconciler_Reconcile(t *testing.T) {
 			Containers: []corev1.Container{
 				{
 					Name:  testContainer,
-					Image: "registry.redhat.io/ubi8/ubi:latest",
+					Image: testMainImage,
 				},
 			},
 		},
@@ -207,7 +209,7 @@ func TestPodReconciler_Reconcile_ExistingCR(t *testing.T) {
 			Containers: []corev1.Container{
 				{
 					Name:  "new-container",
-					Image: "registry.redhat.io/ubi8/ubi:latest",
+					Image: testMainImage,
 				},
 			},
 		},
@@ -1996,6 +1998,14 @@ func TestPodDiscoveryPredicate(t *testing.T) {
 		return pod
 	}
 
+	// withInit returns a pod whose only init container has the given image ID.
+	withInit := func(phase corev1.PodPhase, imageID string) *corev1.Pod {
+		pod := newPod(phase, "img-a")
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: testInitName, ImageID: imageID}}
+
+		return pod
+	}
+
 	p := podDiscoveryPredicate()
 
 	if !p.Create(event.CreateEvent{Object: newPod(corev1.PodPending)}) {
@@ -2038,6 +2048,18 @@ func TestPodDiscoveryPredicate(t *testing.T) {
 			new:  newPod(corev1.PodRunning, "img-a", "img-b"),
 			want: true,
 		},
+		{
+			name: "new init container status is admitted",
+			old:  newPod(corev1.PodPending, "img-a"),
+			new:  withInit(corev1.PodPending, "img-init"),
+			want: true,
+		},
+		{
+			name: "init container image ID change is admitted",
+			old:  withInit(corev1.PodPending, "img-init"),
+			new:  withInit(corev1.PodPending, "img-init2"),
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2048,6 +2070,14 @@ func TestPodDiscoveryPredicate(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("non-pod objects are admitted", func(t *testing.T) {
+		// The predicate is a fallback: if it is ever asked about something that
+		// is not a Pod, it must not silently drop the event.
+		if !p.Update(event.UpdateEvent{ObjectOld: &corev1.ConfigMap{}, ObjectNew: &corev1.ConfigMap{}}) {
+			t.Error("Update() = false, want true when the objects are not pods")
+		}
+	})
 }
 
 // envtestReconcileNamespace is the namespace used by the envtest reconcile test.
@@ -3059,5 +3089,134 @@ func TestProcessEnrichRequest_PermanentFailureIsNotRequeued(t *testing.T) {
 				t.Errorf("NumRequeues() = %d, want %d", got, tt.wantRequeues)
 			}
 		})
+	}
+}
+
+func TestPodImageSetChanged(t *testing.T) {
+	keep := "docker-pullable://registry.redhat.io/ubi8/ubi@" + testDigest
+	changed := "docker-pullable://registry.redhat.io/ubi8/ubi@" +
+		"sha256:bbb456def456abc123def456abc123def456abc123def456abc123def456abc1"
+	initImage := "docker-pullable://registry.redhat.io/ubi8/ubi-minimal@" +
+		"sha256:ccc456def456abc123def456abc123def456abc123def456abc123def456abc1"
+
+	podWith := func(phase corev1.PodPhase, mainIDs, initIDs []string) *corev1.Pod {
+		pod := &corev1.Pod{Status: corev1.PodStatus{Phase: phase}}
+		for i, id := range mainIDs {
+			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+				Name:    fmt.Sprintf("app-%d", i),
+				ImageID: id,
+			})
+		}
+		for i, id := range initIDs {
+			pod.Status.InitContainerStatuses = append(pod.Status.InitContainerStatuses, corev1.ContainerStatus{
+				Name:    fmt.Sprintf("init-%d", i),
+				ImageID: id,
+			})
+		}
+		return pod
+	}
+
+	tests := []struct {
+		name string
+		old  *corev1.Pod
+		new  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "identical pods",
+			old:  podWith(corev1.PodPending, []string{keep}, nil),
+			new:  podWith(corev1.PodPending, []string{keep}, nil),
+			want: false,
+		},
+		{
+			name: "init container status added",
+			old:  podWith(corev1.PodPending, []string{keep}, nil),
+			new:  podWith(corev1.PodPending, []string{keep}, []string{initImage}),
+			want: true,
+		},
+		{
+			name: "init image ID changed",
+			old:  podWith(corev1.PodPending, []string{keep}, []string{initImage}),
+			new:  podWith(corev1.PodPending, []string{keep}, []string{changed}),
+			want: true,
+		},
+		{
+			name: "main image ID changed",
+			old:  podWith(corev1.PodPending, []string{keep}, []string{initImage}),
+			new:  podWith(corev1.PodPending, []string{changed}, []string{initImage}),
+			want: true,
+		},
+		{
+			name: "phase changed",
+			old:  podWith(corev1.PodPending, []string{keep}, []string{initImage}),
+			new:  podWith(corev1.PodRunning, []string{keep}, []string{initImage}),
+			want: true,
+		},
+		{
+			name: "reordered statuses with the same IDs",
+			old:  podWith(corev1.PodRunning, []string{keep, changed}, []string{initImage}),
+			new:  podWith(corev1.PodRunning, []string{changed, keep}, []string{initImage}),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podImageSetChanged(tt.old, tt.new); got != tt.want {
+				t.Errorf("podImageSetChanged() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_Reconcile_InitContainer(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	initImageID := "docker-pullable://registry.redhat.io/ubi8/ubi-minimal@sha256:ccc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+
+	pod := &corev1.Pod{
+		Name:      testPodName,
+		Namespace: testNamespace,
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{
+				{Name: testInitName, Image: "registry.redhat.io/ubi8/ubi-minimal:latest"},
+			},
+			Containers: []corev1.Container{
+				{Name: testContainer, Image: testMainImage},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: testInitName, ImageID: initImageID},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		WithStatusSubresource(&securityv1alpha1.ImageCertificationInfo{}).
+		Build()
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(ctx, reconcile.Request{Name: testPodName, Namespace: testNamespace}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var crList securityv1alpha1.ImageCertificationInfoList
+	if err := fakeClient.List(ctx, &crList); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(crList.Items) != 1 {
+		t.Fatalf("ImageCertificationInfo count = %d, want 1", len(crList.Items))
+	}
+	if got := crList.Items[0].Spec.Repository; got != "ubi8/ubi-minimal" {
+		t.Errorf("Spec.Repository = %q, want %q", got, "ubi8/ubi-minimal")
+	}
+	if got := crList.Items[0].Status.PodReferences; len(got) != 1 || got[0].Container != testInitName {
+		t.Errorf("PodReferences = %+v, want one reference to the init container", got)
 	}
 }
