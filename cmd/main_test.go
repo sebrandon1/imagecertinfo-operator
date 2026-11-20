@@ -204,3 +204,62 @@ func TestValidateIntervals(t *testing.T) {
 		})
 	}
 }
+
+const (
+	nsDefault    = "default"
+	nsKubeSystem = "kube-system"
+)
+
+func TestParseWatchNamespaces(t *testing.T) {
+	tests := []struct {
+		name    string
+		csv     string
+		want    []string
+		wantErr string
+	}{
+		{name: "empty means all namespaces", csv: ""},
+		{name: "whitespace only means all namespaces", csv: " , "},
+		{name: "single namespace", csv: nsDefault, want: []string{nsDefault}},
+		{
+			name: "list with padding and empty entries",
+			csv:  " default , kube-system ,, monitoring ",
+			want: []string{nsDefault, nsKubeSystem, "monitoring"},
+		},
+		{name: "duplicates collapse", csv: "a,a", want: []string{"a"}},
+		{name: "invalid name is rejected", csv: "Bad_NS", wantErr: `invalid namespace "Bad_NS"`},
+		{name: "one bad name rejects the whole list", csv: nsDefault + ",UPPER", wantErr: "UPPER"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseWatchNamespaces(tt.csv)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("parseWatchNamespaces(%q) = nil error, want one containing %q", tt.csv, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseWatchNamespaces() error = %q, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseWatchNamespaces() error = %v, want nil", err)
+			}
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("parseWatchNamespaces(%q) = %v, want nil so the manager watches everything", tt.csv, got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseWatchNamespaces(%q) = %v, want %v", tt.csv, got, tt.want)
+			}
+			for _, ns := range tt.want {
+				if _, ok := got[ns]; !ok {
+					t.Errorf("namespace %q missing from %v", ns, got)
+				}
+			}
+		})
+	}
+}

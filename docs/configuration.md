@@ -95,6 +95,7 @@ never enriched.
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `--watch-namespaces` | Comma-separated namespaces to watch. Pods and `ImageCertificationInfo` resources outside the list are ignored (default: all namespaces) | (none) |
 | `--cleanup-interval` | Interval for cleaning up stale pod references. Must be greater than zero | `5m` |
 | `--enrichment-workers` | Number of concurrent workers enriching newly discovered images | `4` |
 
