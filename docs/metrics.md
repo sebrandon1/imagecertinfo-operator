@@ -101,6 +101,22 @@ kubectl apply -k config/prometheus -n imagecertinfo-operator-system
 in ten minutes, so an idle operator with the refresh loop disabled does not
 alert.
 
+## Grafana Dashboard
+
+`config/grafana/dashboard-configmap.yaml` is a ready-to-import Grafana dashboard
+covering certification status, vulnerabilities by severity, EOL pressure, health
+grades and Pyxis request health. The `grafana_dashboard: "1"` label lets the
+Grafana sidecar pick it up automatically; otherwise import the JSON by hand:
+
+```bash
+kubectl apply -k config/grafana -n imagecertinfo-operator-system
+kubectl get configmap imagecertinfo-operator-dashboard -n imagecertinfo-operator-system \
+  -o jsonpath='{.data.dashboard\.json}' > dashboard.json
+```
+
+Then in Grafana, **Dashboards → New → Import**, upload `dashboard.json` and pick
+your Prometheus data source when prompted.
+
 ## OpenShift Monitoring Integration
 
 To enable metrics scraping with OpenShift's built-in monitoring:
