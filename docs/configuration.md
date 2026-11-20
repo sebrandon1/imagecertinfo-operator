@@ -68,6 +68,23 @@ in the namespace. Rotation is inactive when `--pyxis-refresh-interval=0`.
 | `--dockerhub-rate-limit` | Docker Hub API requests per second | `5` |
 | `--dockerhub-rate-burst` | Burst size for Docker Hub rate limiting | `10` |
 
+## GitHub Container Registry
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--ghcr-enabled` | Enable GitHub Container Registry enrichment for `ghcr.io` images | `false` |
+| `--github-token` | GitHub token used for package lookups (can also use the `GITHUB_TOKEN` env var) | (none) |
+
+GHCR enrichment is opt-in because every GitHub package endpoint requires a
+token, even for public packages. Without one, GitHub rejects the lookup and the
+operator keeps whatever it had: `ghcr.io` images simply stay unenriched. A
+fine-grained token with `packages: read` is enough.
+
+Enrichment adds `.status.ghcrData` with the package visibility, version count,
+package URL and the published/updated timestamps. There is no cache or rate
+limiter for GHCR: images are enriched when first discovered and then on the
+refresh interval, and GitHub's own limits are per token rather than per second.
+
 ## Quay.io
 
 | Flag | Description | Default |

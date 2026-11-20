@@ -46,6 +46,7 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/ghcr"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 
@@ -66,6 +67,7 @@ const (
 const (
 	RegistryDockerHub = "docker.io"
 	RegistryQuayIO    = "quay.io"
+	RegistryGHCR      = "ghcr.io"
 )
 
 // Annotation keys
@@ -114,6 +116,7 @@ type PodReconciler struct {
 	PyxisClient     pyxis.Client
 	DockerHubClient dockerhub.Client
 	QuayClient      quaylib.RepositoryReader
+	GHCRClient      ghcr.Client
 	Recorder        record.EventRecorder
 
 	// OrphanRetention is how long a CR with no live pod references is kept
@@ -594,6 +597,121 @@ func isDockerHubTrustStatus(status securityv1alpha1.CertificationStatus) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// checkGHCRData queries the GitHub packages API for container metadata. It
+// returns an error when the enrichment should be retried.
+func (r *PodReconciler) checkGHCRData(ctx context.Context, crName string, ref *image.Reference) error {
+	logger := log.FromContext(ctx).WithValues("crName", crName)
+
+	if r.GHCRClient == nil {
+		return nil
+	}
+
+	owner, name := parseGHCRRepo(ref.Repository)
+
+	info, err := r.GHCRClient.GetPackage(ctx, owner, name)
+
+	var cr securityv1alpha1.ImageCertificationInfo
+	if err := r.Get(ctx, client.ObjectKey{Name: crName}, &cr); err != nil {
+		logger.Error(err, "failed to get ImageCertificationInfo for GHCR update")
+
+		return err
+	}
+
+	changed, err := applyGHCRResult(ctx, &cr, info, err)
+	if err != nil {
+		return err
+	}
+
+	if !changed {
+		return nil
+	}
+
+	if err := r.Status().Update(ctx, &cr); err != nil {
+		logger.Error(err, "failed to update ImageCertificationInfo with GHCR data")
+
+		return err
+	}
+
+	return nil
+}
+
+// applyGHCRResult folds one package lookup into a CR's status. It is the single
+// place that decides what a GHCR outcome means, so the reconcile and refresh
+// paths cannot drift apart.
+//
+// It reports whether the status changed, and returns an error only when the
+// lookup should be retried: a missing token will not fix itself and a deleted
+// package will not reappear, so both are terminal for this cycle.
+func applyGHCRResult(
+	ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo, info *ghcr.PackageInfo, lookupErr error,
+) (bool, error) {
+	logger := log.FromContext(ctx).WithValues("crName", cr.Name, "package", cr.Spec.Repository)
+
+	switch {
+	case errors.Is(lookupErr, ghcr.ErrUnauthorized):
+		// Every package endpoint needs a token, so an operator running without
+		// --github-token lands here for every image. Keep the previous
+		// enrichment and do not retry: no amount of backoff adds credentials.
+		logger.Info("GitHub rejected the request; ghcr.io enrichment needs a token")
+
+		return false, nil
+	case errors.Is(lookupErr, ghcr.ErrNotFound):
+		// The package is gone, renamed, or private. Drop the previous payload so
+		// the CR stops advertising metadata GitHub no longer confirms.
+		if cr.Status.GHCRData == nil {
+			return false, nil
+		}
+
+		cr.Status.GHCRData = nil
+
+		return true, nil
+	case lookupErr != nil:
+		logger.Error(lookupErr, "failed to query the GitHub packages API")
+
+		return false, lookupErr
+	default:
+		cr.Status.GHCRData = ghcrStatusData(info)
+
+		return true, nil
+	}
+}
+
+// ghcrStatusData converts a package lookup into the CRD's status payload.
+func ghcrStatusData(info *ghcr.PackageInfo) *securityv1alpha1.GHCRData {
+	return &securityv1alpha1.GHCRData{
+		Visibility:    info.Visibility,
+		VersionCount:  info.VersionCount,
+		PackageURL:    info.HTMLURL,
+		PublishedAt:   timePtr(info.CreatedAt),
+		LastUpdatedAt: timePtr(info.UpdatedAt),
+	}
+}
+
+// timePtr converts a time.Time to a metav1.Time pointer, returning nil for the
+// zero value so an absent timestamp stays absent in the API.
+func timePtr(t time.Time) *metav1.Time {
+	if t.IsZero() {
+		return nil
+	}
+
+	return &metav1.Time{Time: t}
+}
+
+// parseGHCRRepo splits a ghcr.io repository into the package owner and name.
+// GitHub addresses a package by its repository name, so ghcr.io/org/team/app is
+// package "app" owned by "org".
+func parseGHCRRepo(repository string) (owner, name string) {
+	parts := strings.Split(strings.Trim(repository, "/"), "/")
+	switch {
+	case len(parts) == 0:
+		return "", ""
+	case len(parts) == 1:
+		return parts[0], parts[0]
+	default:
+		return parts[0], parts[len(parts)-1]
 	}
 }
 
@@ -1281,6 +1399,8 @@ func (r *PodReconciler) enrich(ctx context.Context, item enrichRequest) error {
 		return r.checkDockerHubData(ctx, item.crName, &item.ref)
 	case r.QuayClient != nil && item.ref.Registry == RegistryQuayIO:
 		return r.checkQuayData(ctx, item.crName, &item.ref)
+	case r.GHCRClient != nil && item.ref.Registry == RegistryGHCR:
+		return r.checkGHCRData(ctx, item.crName, &item.ref)
 	default:
 		return nil
 	}
@@ -1319,9 +1439,10 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context, minRefreshAge time
 		isRedHatRegistry := cr.Status.RegistryType == securityv1alpha1.RegistryTypeRedHat
 		isDockerHub := cr.Spec.Registry == RegistryDockerHub
 		isQuayIO := cr.Spec.Registry == RegistryQuayIO
+		isGHCR := cr.Spec.Registry == RegistryGHCR
 
 		// Skip if no enrichment is possible
-		if !isRedHatRegistry && !isDockerHub && !isQuayIO {
+		if !isRedHatRegistry && !isDockerHub && !isQuayIO && !isGHCR {
 			skipped++
 			continue
 		}
@@ -1430,6 +1551,14 @@ func (r *PodReconciler) refreshSingleImage(ctx context.Context, cr *securityv1al
 			// Docker Hub answered successfully but no longer knows this
 			// repository, so the previous payload is stale.
 			clearDockerHubStatus(&latestCR)
+		}
+	} else if cr.Spec.Registry == RegistryGHCR && r.GHCRClient != nil {
+		owner, name := parseGHCRRepo(cr.Spec.Repository)
+
+		info, lookupErr := r.GHCRClient.GetPackage(ctx, owner, name)
+
+		if _, err := applyGHCRResult(ctx, &latestCR, info, lookupErr); err != nil {
+			return err
 		}
 	} else if cr.Spec.Registry == RegistryQuayIO && r.QuayClient != nil {
 		namespace, repo := parseQuayRepo(cr.Spec.Repository)
