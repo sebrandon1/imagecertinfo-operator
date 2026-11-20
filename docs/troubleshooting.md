@@ -13,6 +13,32 @@ them:
 kubectl logs -l control-plane=controller-manager -n imagecertinfo-operator-system | jq -r '.msg'
 ```
 
+## Is the Pyxis API Reachable From the Operator?
+
+**Symptoms:** Every image shows `Unknown` certification status, or enrichment is
+silently failing.
+
+The operator exposes a named health check per upstream API. Unlike `/readyz`,
+these do real requests, so query them on demand rather than on a probe:
+
+```bash
+kubectl port-forward -n imagecertinfo-operator-system deploy/imagecertinfo-controller-manager 8081:8081
+curl -s localhost:8081/healthz/pyxis
+curl -s localhost:8081/healthz/dockerhub
+```
+
+An `ok` response means the API answered; `500` with `<name> API is not reachable`
+means it did not. From inside the cluster:
+
+```bash
+kubectl exec -n imagecertinfo-operator-system deploy/imagecertinfo-controller-manager -- \
+  curl -s localhost:8081/healthz/pyxis
+```
+
+These checks are not part of readiness on purpose: an upstream outage must not
+unready or restart the operator. Pass `--api-health-checks=false` to register
+none of them, for example on an air-gapped install where every check would fail.
+
 ## Pyxis API Errors
 
 **Symptoms:** Images show `Unknown` certification status, Pyxis-related errors in logs.
