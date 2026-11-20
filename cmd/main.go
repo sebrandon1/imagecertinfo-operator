@@ -324,6 +324,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The Secret reader is kept so the key can be re-read when it rotates.
+	var secretReader *secrets.SecretReader
+	var apiKeyFromSecret bool
+
 	// Read Pyxis API key from Secret if not already set and secret name is provided
 	if pyxisAPIKey == "" && pyxisAPIKeySecretName != "" {
 		setupLog.Info("Reading Pyxis API key from Secret",
@@ -338,7 +342,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		secretReader := secrets.NewSecretReader(secretClient)
+		secretReader = secrets.NewSecretReader(secretClient)
 		apiKey, err := secretReader.ReadAPIKey(
 			context.Background(),
 			pyxisAPIKeySecretNamespace,
@@ -361,12 +365,14 @@ func main() {
 			os.Exit(1)
 		}
 		pyxisAPIKey = apiKey
+		apiKeyFromSecret = true
 		setupLog.Info("Successfully read Pyxis API key from Secret")
 	}
 
 	// Initialize Pyxis client if enabled
 	// The public Pyxis API works without authentication for read-only queries
 	var pyxisClient pyxis.Client
+	var pyxisBaseClient *pyxis.HTTPClient
 	if pyxisEnabled {
 		setupLog.Info("Pyxis integration enabled (no auth required for public API)",
 			"baseURL", pyxisBaseURL,
@@ -380,11 +386,11 @@ func main() {
 			setupLog.Info("Using API key for Pyxis authentication")
 			clientOpts = append(clientOpts, pyxis.WithAPIKey(pyxisAPIKey))
 		}
-		baseClient := pyxis.NewHTTPClient(clientOpts...)
+		pyxisBaseClient = pyxis.NewHTTPClient(clientOpts...)
 
 		// Wrap with caching and rate limiting
 		pyxisClient = pyxis.NewCachedRateLimitedClient(
-			baseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst, pyxisCacheMaxEntries)
+			pyxisBaseClient, pyxisCacheTTL, pyxisRateLimit, pyxisRateBurst, pyxisCacheMaxEntries)
 	}
 
 	// Initialize Docker Hub client if enabled
@@ -466,6 +472,34 @@ func main() {
 			"pyxis", pyxisClient != nil, "dockerhub", dockerHubClient != nil, "quay", quayClient != nil)
 		addRunnable(mgr, "refresh loop", func(ctx context.Context) error {
 			return podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
+		})
+	}
+
+	// Re-read a Secret-backed API key so a rotated credential takes effect
+	// without a restart. The loop runs only on the leader, which is the replica
+	// that performs enrichment, and reads once on start so a failover picks up
+	// any rotation that happened in the meantime.
+	if apiKeyFromSecret && pyxisBaseClient != nil && pyxisRefreshInterval > 0 {
+		rotation := secrets.KeyRotation{
+			Namespace:  pyxisAPIKeySecretNamespace,
+			SecretName: pyxisAPIKeySecretName,
+			SecretKey:  pyxisAPIKeySecretKey,
+			Interval:   pyxisRefreshInterval,
+			Initial:    pyxisAPIKey,
+			OnRotate: func(apiKey string) {
+				pyxisBaseClient.SetAPIKey(apiKey)
+				// Never log the key itself, or its length.
+				setupLog.Info("Pyxis API key rotated from Secret",
+					"secretName", pyxisAPIKeySecretName,
+					"secretNamespace", pyxisAPIKeySecretNamespace)
+			},
+		}
+		setupLog.Info("Re-reading Pyxis API key Secret for rotation",
+			"secretName", pyxisAPIKeySecretName,
+			"secretNamespace", pyxisAPIKeySecretNamespace,
+			"interval", pyxisRefreshInterval)
+		addRunnable(mgr, "pyxis api key rotation", func(ctx context.Context) error {
+			return secretReader.StartRotationLoop(ctx, rotation)
 		})
 	}
 

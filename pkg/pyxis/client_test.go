@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -248,8 +249,8 @@ func TestNewHTTPClient_Options(t *testing.T) {
 	if client.baseURL != "https://custom.api.example.com" {
 		t.Errorf("baseURL = %v, want https://custom.api.example.com", client.baseURL)
 	}
-	if client.apiKey != "test-api-key" {
-		t.Errorf("apiKey = %v, want test-api-key", client.apiKey)
+	if client.APIKey() != "test-api-key" {
+		t.Errorf("APIKey() = %v, want test-api-key", client.APIKey())
 	}
 }
 
@@ -710,5 +711,66 @@ func TestHTTPClient_DoJSONWithRetry_StopsWhenContextExpires(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("doJSONWithRetry() took %v, want it to stop at the deadline", elapsed)
+	}
+}
+
+func TestHTTPClient_APIKeyRotation(t *testing.T) {
+	const digest = "sha256:abc123"
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get(apiKeyHeader))
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"total":0,"data":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(WithBaseURL(server.URL), WithAPIKey("first"))
+
+	lastHeader := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if len(seen) == 0 {
+			t.Fatal("no request reached the server")
+		}
+
+		return seen[len(seen)-1]
+	}
+
+	request := func() {
+		t.Helper()
+
+		if _, err := client.GetImageCertification(
+			context.Background(), "registry.redhat.io", "ubi9/ubi", digest); err != nil {
+			t.Fatalf("GetImageCertification() error = %v", err)
+		}
+	}
+
+	request()
+	if got := lastHeader(); got != "first" {
+		t.Errorf("X-API-KEY = %q, want first", got)
+	}
+
+	// A rotated key must apply to the next request without rebuilding the
+	// client, which is what makes Secret rotation work.
+	client.SetAPIKey("second")
+	request()
+	if got := lastHeader(); got != "second" {
+		t.Errorf("X-API-KEY = %q, want second after SetAPIKey", got)
+	}
+
+	// Clearing the key must remove the header rather than send an empty one.
+	client.SetAPIKey("")
+	request()
+	if got := lastHeader(); got != "" {
+		t.Errorf("X-API-KEY = %q, want it absent after the key was cleared", got)
 	}
 }

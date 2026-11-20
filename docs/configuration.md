@@ -27,6 +27,14 @@ Instead of passing the API key via flag or environment variable, you can store i
 
 Priority order: `--pyxis-api-key` flag → `PYXIS_API_KEY` env var → Secret.
 
+A Secret-backed key is re-read once per `--pyxis-refresh-interval`, so a rotated
+key takes effect without restarting the operator. The loop runs on the leader
+only and reads once when it starts, so a failover picks up any rotation. A failed
+read keeps the previous key. Rotation is polled rather than watched because the
+shipped Role grants `get` on one Secret by name, and `list`/`watch` cannot be
+restricted with `resourceNames` — a watch would need read access to every Secret
+in the namespace. Rotation is inactive when `--pyxis-refresh-interval=0`.
+
 > [!WARNING]
 > The shipped RBAC grants `get` on **one** Secret, named `pyxis-api-key`, in the
 > operator namespace (`imagecertinfo-operator-system` by default). The Role is
