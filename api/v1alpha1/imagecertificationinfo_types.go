@@ -321,6 +321,21 @@ type ImageCertificationInfoStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// Supply chain metadata
+
+	// SBOMURI is where the image's software bill of materials can be fetched,
+	// for example a cosign attestation URI or a registry SBOM endpoint. The
+	// operator does not populate it: a signing controller publishes the
+	// attestation and writes the URI here, and consumers read it from the CR.
+	// +optional
+	SBOMURI string `json:"sbomURI,omitempty"`
+
+	// AttestationURI is where the image's signed provenance attestation (for
+	// example an in-toto/SLSA statement) can be fetched. Like SBOMURI it is a
+	// contract for external producers rather than something the operator sets.
+	// +optional
+	AttestationURI string `json:"attestationURI,omitempty"`
+
 	// Enhanced fields for v0.2.0
 
 	// ImageAge is the computed age of the image since it was published (e.g., "45 days")
