@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -31,8 +32,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	apimachineryvalidation "k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -79,6 +82,7 @@ func main() {
 	var pyxisEnabled bool
 	var pyxisBaseURL string
 	var pyxisAPIKey string
+	var watchNamespacesCSV string
 	var cleanupInterval time.Duration
 	var enrichmentWorkers int
 	var pyxisCacheTTL time.Duration
@@ -130,6 +134,9 @@ func main() {
 		"Base URL for the Pyxis API")
 	flag.StringVar(&pyxisAPIKey, "pyxis-api-key", "",
 		"Optional API key for Pyxis authentication (public API works without auth, can also use PYXIS_API_KEY env var)")
+	flag.StringVar(&watchNamespacesCSV, "watch-namespaces", "",
+		"Comma-separated namespaces to watch (default: all namespaces). "+
+			"Pods and ImageCertificationInfo resources outside the list are ignored")
 	flag.DurationVar(&cleanupInterval, "cleanup-interval", 5*time.Minute,
 		"Interval for cleaning up stale pod references (must be greater than zero)")
 	flag.IntVar(&enrichmentWorkers, "enrichment-workers", controller.DefaultEnrichmentWorkers,
@@ -271,9 +278,19 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	watchNamespaces, err := parseWatchNamespaces(watchNamespacesCSV)
+	if err != nil {
+		setupLog.Error(err, "invalid --watch-namespaces")
+		os.Exit(1)
+	}
+	if watchNamespaces != nil {
+		setupLog.Info("Watching a subset of namespaces", "namespaces", watchNamespacesCSV)
+	}
+
 	restConfig := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  cache.Options{DefaultNamespaces: watchNamespaces},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -571,4 +588,30 @@ func addCacheCleanup(mgr ctrl.Manager, c any, interval time.Duration) bool {
 	}
 
 	return true
+}
+
+// parseWatchNamespaces turns the comma-separated --watch-namespaces value into
+// the controller-runtime cache config. An empty value returns nil, which makes
+// the manager watch every namespace, preserving the default behavior.
+func parseWatchNamespaces(csv string) (map[string]cache.Config, error) {
+	namespaces := make(map[string]cache.Config)
+
+	for raw := range strings.SplitSeq(csv, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+
+		if errs := apimachineryvalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid namespace %q: %s", name, strings.Join(errs, ", "))
+		}
+
+		namespaces[name] = cache.Config{}
+	}
+
+	if len(namespaces) == 0 {
+		return nil, nil
+	}
+
+	return namespaces, nil
 }
