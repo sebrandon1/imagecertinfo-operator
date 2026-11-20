@@ -212,6 +212,15 @@ var (
 		},
 	)
 
+	// ImagesGarbageCollectedTotal tracks orphaned CRs removed by retention
+	ImagesGarbageCollectedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "images_garbage_collected_total",
+			Help:      "Total number of orphaned ImageCertificationInfo resources deleted",
+		},
+	)
+
 	// CertificationStatusChangesTotal tracks certification status changes
 	CertificationStatusChangesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -334,6 +343,8 @@ func init() {
 		ImagesRefreshedTotal,
 		RefreshImagesTotal,
 		RefreshImageErrorsLastCycle,
+
+		ImagesGarbageCollectedTotal,
 		CertificationStatusChangesTotal,
 		// Docker Hub API metrics
 		DockerHubRequestsTotal,
@@ -498,6 +509,11 @@ func RecordRefreshResult(result string, n int) {
 // a gauge so a clean cycle resets the previous cycle's failures to zero.
 func SetRefreshErrorCount(n int) {
 	RefreshImageErrorsLastCycle.Set(float64(n))
+}
+
+// RecordImageGarbageCollected records an orphaned CR deleted by retention.
+func RecordImageGarbageCollected() {
+	ImagesGarbageCollectedTotal.Inc()
 }
 
 // RecordCertificationStatusChange records a certification status change

@@ -87,6 +87,7 @@ func main() {
 	var pyxisAPIKey string
 	var watchNamespacesCSV string
 	var cleanupInterval time.Duration
+	var orphanRetention time.Duration
 	var enrichmentWorkers int
 	var pyxisCacheTTL time.Duration
 	var pyxisCacheMaxEntries int
@@ -146,6 +147,9 @@ func main() {
 			"Pods and ImageCertificationInfo resources outside the list are ignored")
 	flag.DurationVar(&cleanupInterval, "cleanup-interval", 5*time.Minute,
 		"Interval for cleaning up stale pod references (must be greater than zero)")
+	flag.DurationVar(&orphanRetention, "orphan-retention", 0,
+		"Delete ImageCertificationInfo resources that have had no pod reference for this long "+
+			"(0 disables deletion, the default)")
 	flag.IntVar(&enrichmentWorkers, "enrichment-workers", controller.DefaultEnrichmentWorkers,
 		"Number of concurrent workers enriching newly discovered images (default 4)")
 	flag.DurationVar(&pyxisCacheTTL, "pyxis-cache-ttl", pyxis.DefaultCacheTTL,
@@ -421,6 +425,7 @@ func main() {
 		DockerHubClient: dockerHubClient,
 		QuayClient:      quayClient,
 		Recorder:        mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
+		OrphanRetention: orphanRetention,
 	}
 
 	if err = podReconciler.SetupWithManager(mgr); err != nil {

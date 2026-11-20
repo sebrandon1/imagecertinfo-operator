@@ -59,6 +59,7 @@ const (
 	EventReasonVulnerabilitiesFound = "VulnerabilitiesFound"
 	EventReasonEOLApproaching       = "EOLApproaching"
 	EventReasonHealthDegraded       = "HealthDegraded"
+	EventReasonGarbageCollected     = "GarbageCollected"
 )
 
 // Registry constants
@@ -114,6 +115,11 @@ type PodReconciler struct {
 	DockerHubClient dockerhub.Client
 	QuayClient      quaylib.RepositoryReader
 	Recorder        record.EventRecorder
+
+	// OrphanRetention is how long a CR with no live pod references is kept
+	// before it is deleted. Zero disables garbage collection, which is the
+	// default: deleting inventory is destructive and must be opted into.
+	OrphanRetention time.Duration
 
 	// EnrichQueue feeds the bounded enrichment workers. It is nil when the
 	// reconciler is used outside a manager (for example in tests), in which
@@ -1006,6 +1012,8 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 		existing[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}] = struct{}{}
 	}
 
+	now := time.Now()
+
 	for i := range crList.Items {
 		cr := &crList.Items[i]
 		var validRefs []securityv1alpha1.PodReference
@@ -1021,6 +1029,16 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 			// Otherwise the reference is stale and won't be kept
 		}
 
+		// Delete before pruning: a CR that is about to disappear does not need
+		// a status write, and the write would only race the delete.
+		if r.orphanExpired(validRefs, cr.Status.LastSeenAt, now) {
+			if err := r.deleteOrphan(ctx, cr); err != nil {
+				logger.Error(err, "failed to delete orphaned ImageCertificationInfo", "name", cr.Name)
+			}
+
+			continue
+		}
+
 		if len(validRefs) != len(cr.Status.PodReferences) {
 			if err := r.updateCRStatus(ctx, cr.Name, func(latest *securityv1alpha1.ImageCertificationInfo) {
 				latest.Status.PodReferences = validRefs
@@ -1031,6 +1049,43 @@ func (r *PodReconciler) CleanupStaleReferences(ctx context.Context) error {
 	}
 
 	r.RecomputeInventoryMetrics(ctx)
+
+	return nil
+}
+
+// orphanExpired reports whether a CR with no live pod references has gone
+// unseen long enough to delete. A nil LastSeenAt is never expired: without a
+// timestamp there is no proof the image is gone, so the CR is kept.
+func (r *PodReconciler) orphanExpired(
+	refs []securityv1alpha1.PodReference, lastSeen *metav1.Time, now time.Time,
+) bool {
+	if r.OrphanRetention <= 0 || len(refs) > 0 || lastSeen == nil {
+		return false
+	}
+
+	return lastSeen.Add(r.OrphanRetention).Before(now)
+}
+
+// deleteOrphan removes one orphaned CR and records the deletion as an event and
+// a metric, so an operator can see what the retention period reclaimed.
+func (r *PodReconciler) deleteOrphan(
+	ctx context.Context, cr *securityv1alpha1.ImageCertificationInfo,
+) error {
+	if err := r.Delete(ctx, cr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		return err
+	}
+
+	metrics.RecordImageGarbageCollected()
+
+	if r.Recorder != nil {
+		r.Recorder.Event(cr, corev1.EventTypeNormal, EventReasonGarbageCollected,
+			fmt.Sprintf("Deleted after %s without a live pod reference", r.OrphanRetention))
+		metrics.RecordEvent(corev1.EventTypeNormal, EventReasonGarbageCollected)
+	}
 
 	return nil
 }
@@ -1250,6 +1305,15 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context, minRefreshAge time
 
 	for i := range crList.Items {
 		cr := &crList.Items[i]
+
+		// An orphan is kept until its retention period expires. Refreshing it
+		// would spend API quota on an image no pod runs, so skip it while
+		// garbage collection is enabled.
+		if r.OrphanRetention > 0 && len(cr.Status.PodReferences) == 0 {
+			skipped++
+
+			continue
+		}
 
 		// Determine which API to use based on stored registry type
 		isRedHatRegistry := cr.Status.RegistryType == securityv1alpha1.RegistryTypeRedHat

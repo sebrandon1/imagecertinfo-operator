@@ -55,6 +55,8 @@ that Quay is failing.
 | `imagecertinfo_images_refreshed_total` | Counter | - | Individual images refreshed |
 | `imagecertinfo_refresh_images_total` | Counter | `result` (`refreshed`, `skipped`, `error`) | Images processed per refresh cycle, by outcome |
 | `imagecertinfo_refresh_image_errors_last_cycle` | Gauge | - | Images that failed in the last completed cycle; resets to `0` on a clean cycle |
+
+| `imagecertinfo_images_garbage_collected_total` | Counter | - | Orphaned `ImageCertificationInfo` resources deleted by `--orphan-retention` |
 | `imagecertinfo_certification_status_changes_total` | Counter | `from`, `to` | Certification status changes |
 
 ## Example PromQL Queries
