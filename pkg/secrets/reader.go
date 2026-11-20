@@ -19,6 +19,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -56,4 +57,66 @@ func (r *SecretReader) ReadAPIKey(ctx context.Context, namespace, secretName, se
 	}
 
 	return string(data), nil
+}
+
+// KeyRotation configures periodic re-reading of a Secret-backed API key.
+type KeyRotation struct {
+	Namespace  string
+	SecretName string
+	SecretKey  string
+	// Interval is how often the Secret is re-read. A non-positive value
+	// disables rotation.
+	Interval time.Duration
+	// Initial is the value read at startup, so the loop reports actual changes
+	// rather than the initial read.
+	Initial string
+	// OnRotate receives the new key when it differs from the previous value.
+	OnRotate func(key string)
+}
+
+// StartRotationLoop re-reads the API key Secret every Interval until ctx is
+// cancelled, calling OnRotate when the value changes. It blocks, so it can be
+// registered as a manager Runnable.
+//
+// A failed read keeps the previous key: a transient API error must not drop
+// authentication. Rotation is polled rather than watched because the shipped
+// RBAC grants get on a single Secret by name, and list/watch cannot be
+// restricted with resourceNames - a watch would need read access to every
+// Secret in the namespace.
+func (r *SecretReader) StartRotationLoop(ctx context.Context, cfg KeyRotation) error {
+	if cfg.Interval <= 0 || cfg.OnRotate == nil {
+		return nil
+	}
+
+	current := cfg.Initial
+
+	reload := func() {
+		apiKey, err := r.ReadAPIKey(ctx, cfg.Namespace, cfg.SecretName, cfg.SecretKey)
+		if err != nil {
+			return
+		}
+
+		if apiKey == current {
+			return
+		}
+
+		current = apiKey
+		cfg.OnRotate(apiKey)
+	}
+
+	// Read once immediately so a replica that has just become leader picks up a
+	// rotation that happened while it was idle.
+	reload()
+
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			reload()
+		}
+	}
 }

@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/sebrandon1/go-toolbox/httpx"
@@ -35,6 +36,8 @@ import (
 )
 
 const (
+	// apiKeyHeader carries the optional Pyxis API key.
+	apiKeyHeader = "X-API-KEY"
 	// DefaultBaseURL is the default Pyxis API base URL
 	DefaultBaseURL = "https://catalog.redhat.com/api/containers/v1"
 	// DefaultTimeout is the default HTTP client timeout
@@ -67,8 +70,12 @@ type Client interface {
 // An optional API key can be provided for authenticated access.
 type HTTPClient struct {
 	baseURL    string
-	apiKey     string // Optional - public API works without auth
 	httpClient *httpx.Client
+
+	// apiKey is read on every request, so a rotated Secret takes effect
+	// without rebuilding the client. The public API works without auth.
+	apiKeyMu sync.RWMutex
+	apiKey   string
 }
 
 // ClientOption is a function that configures an HTTPClient
@@ -87,13 +94,40 @@ func WithBaseURL(baseURL string) ClientOption {
 // so this is optional and only needed for higher rate limits or authenticated endpoints.
 func WithAPIKey(apiKey string) ClientOption {
 	return func(c *HTTPClient) {
-		c.apiKey = apiKey
-		if apiKey != "" {
-			c.httpClient.Headers.Set("X-API-KEY", apiKey)
-		} else {
-			c.httpClient.Headers.Del("X-API-KEY")
-		}
+		c.SetAPIKey(apiKey)
 	}
+}
+
+// SetAPIKey replaces the API key used for subsequent requests. An empty value
+// removes the header. It is safe to call while requests are in flight: the
+// header is applied per request from the value current at that moment.
+func (c *HTTPClient) SetAPIKey(apiKey string) {
+	c.apiKeyMu.Lock()
+	defer c.apiKeyMu.Unlock()
+
+	c.apiKey = apiKey
+}
+
+// APIKey reports the key currently in use.
+func (c *HTTPClient) APIKey() string {
+	c.apiKeyMu.RLock()
+	defer c.apiKeyMu.RUnlock()
+
+	return c.apiKey
+}
+
+// applyAPIKeyHeader writes the current key onto a request, or removes the
+// header when no key is configured. httpx calls it for every request after the
+// static headers are applied.
+func (c *HTTPClient) applyAPIKeyHeader(req *http.Request) {
+	key := c.APIKey()
+	if key == "" {
+		req.Header.Del(apiKeyHeader)
+
+		return
+	}
+
+	req.Header.Set(apiKeyHeader, key)
 }
 
 // WithHTTPClient sets a custom HTTP client
@@ -126,6 +160,10 @@ func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 	for _, opt := range opts {
 		opt(client)
 	}
+
+	// Authenticate per request rather than through the static header, so a key
+	// rotated from a Secret applies to the next request.
+	client.httpClient.SetHeaders = client.applyAPIKeyHeader
 
 	return client
 }
