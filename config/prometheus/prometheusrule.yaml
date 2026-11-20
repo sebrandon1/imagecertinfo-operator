@@ -1,0 +1,68 @@
+# Alert rules for the metrics the operator exports. See docs/metrics.md.
+#
+# This file needs the Prometheus Operator's PrometheusRule CRD, which ships with
+# OpenShift user-workload monitoring and with kube-prometheus-stack. It is kept
+# in config/prometheus, which config/default does not include by default, so the
+# rules are opt-in:
+#
+#   kubectl apply -k config/prometheus -n imagecertinfo-operator-system
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: imagecertinfo-operator-rules
+  labels:
+    app.kubernetes.io/name: imagecertinfo-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+    - name: imagecertinfo-operator.inventory
+      rules:
+        - alert: ImagesCertificationExpired
+          expr: imagecertinfo_images_past_eol > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} tracked images are past their end-of-life date"
+            description: >-
+              Images running in the cluster have passed their published EOL
+              date. Rebuild or replace them before the base image stops
+              receiving security fixes.
+        - alert: ImagesCriticalCVEs
+          expr: imagecertinfo_vulnerabilities_total{severity="critical"} > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} critical vulnerabilities across tracked images"
+            description: >-
+              At least one tracked image has open critical vulnerabilities in
+              its certification or Clair scan data.
+        - alert: ImagesHealthDegraded
+          expr: imagecertinfo_images_by_health{grade="F"} > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} tracked images have health grade F"
+            description: >-
+              Pyxis rates these images F. Images without a Pyxis record are not
+              counted here; quay.io images have no health grade at all.
+    - name: imagecertinfo-operator.upstream
+      rules:
+        - alert: PyxisAPIDown
+          expr: |
+            sum(rate(imagecertinfo_pyxis_requests_total{status="success"}[10m])) == 0
+            and
+            sum(rate(imagecertinfo_pyxis_requests_total[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pyxis API has failed every request for 5 minutes"
+            description: >-
+              The operator is reaching the Pyxis API but no request has
+              succeeded in the last ten minutes, so certification status is
+              stale. Check connectivity to catalog.redhat.com and the status
+              label breakdown on imagecertinfo_pyxis_requests_total.

@@ -85,6 +85,22 @@ sum(rate(imagecertinfo_reconcile_total[5m])) * 100
 | `imagecertinfo_dockerhub_cache_hits_total` | Counter | `result` | Cache hits (`hit`) and misses (`miss`) |
 | `imagecertinfo_dockerhub_cache_entries` | Gauge | - | Number of entries resident in the cache |
 
+## Built-in Alert Rules
+
+`config/prometheus/prometheusrule.yaml` ships four `PrometheusRule` alerts:
+`ImagesCertificationExpired`, `ImagesCriticalCVEs`, `ImagesHealthDegraded` and
+`PyxisAPIDown`. They come with the `config/prometheus` kustomization, which
+`config/default` does not include, so they are opt-in. The `PrometheusRule` CRD
+must be installed (OpenShift user-workload monitoring or kube-prometheus-stack):
+
+```bash
+kubectl apply -k config/prometheus -n imagecertinfo-operator-system
+```
+
+`PyxisAPIDown` fires when requests are still being made but none has succeeded
+in ten minutes, so an idle operator with the refresh loop disabled does not
+alert.
+
 ## OpenShift Monitoring Integration
 
 To enable metrics scraping with OpenShift's built-in monitoring:
