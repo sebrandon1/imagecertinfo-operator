@@ -97,3 +97,27 @@ kubectl get imagecertificationinfo --field-selector=status.certificationStatus=N
 ```bash
 kubectl get imagecertificationinfo -o wide | grep -i deprecated
 ```
+
+## Supply Chain Metadata (SBOM and Attestations)
+
+Two status fields carry supply-chain pointers:
+
+| Field | JSON path | Meaning |
+|-------|-----------|---------|
+| `SBOMURI` | `.status.sbomURI` | Where the image's software bill of materials can be fetched |
+| `AttestationURI` | `.status.attestationURI` | Where the image's signed provenance attestation can be fetched |
+
+The operator does not populate either field. Neither Pyxis, Docker Hub nor Quay
+exposes SBOM or attestation locations, so these fields are a contract for a
+signing controller (for example one that publishes cosign attestations) to
+write, and for consumers such as the
+[tls-compliance-operator](https://github.com/sebrandon1/tls-compliance-operator)
+to read:
+
+```bash
+kubectl patch imagecertificationinfo registry.redhat.io.ubi9.ubi.abc12345 \
+  --subresource=status --type=merge \
+  -p '{"status":{"sbomURI":"registry.redhat.io/ubi9/ubi@sha256:abc12345.att"}}'
+kubectl get imagecertificationinfo registry.redhat.io.ubi9.ubi.abc12345 \
+  -o jsonpath='{.status.sbomURI}'
+```

@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: imagecertificationinfoes.security.telco.openshift.io
 spec:
   group: security.telco.openshift.io
@@ -109,6 +109,12 @@ spec:
           status:
             description: Status defines the observed state of ImageCertificationInfo
             properties:
+              attestationURI:
+                description: |-
+                  AttestationURI is where the image's signed provenance attestation (for
+                  example an in-toto/SLSA statement) can be fetched. Like SBOMURI it is a
+                  contract for external producers rather than something the operator sets.
+                type: string
               certificationStatus:
                 default: Unknown
                 description: CertificationStatus indicates the certification status
@@ -453,6 +459,13 @@ spec:
                 - Community
                 - Private
                 - Unknown
+                type: string
+              sbomURI:
+                description: |-
+                  SBOMURI is where the image's software bill of materials can be fetched,
+                  for example a cosign attestation URI or a registry SBOM endpoint. The
+                  operator does not populate it: a signing controller publishes the
+                  attestation and writes the URI here, and consumers read it from the CR.
                 type: string
             type: object
         required:
