@@ -19,6 +19,8 @@ package dockerhub
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,17 +31,18 @@ import (
 
 // stubClient is a Client that always returns data and counts its calls.
 type stubClient struct {
-	calls int
+	calls   atomic.Int64
+	healthy bool
 }
 
 func (s *stubClient) GetRepositoryInfo(
 	_ context.Context, namespace, repository string,
 ) (*RepositoryInfo, error) {
-	s.calls++
+	s.calls.Add(1)
 	return &RepositoryInfo{Namespace: namespace, Name: repository}, nil
 }
 
-func (s *stubClient) IsHealthy(_ context.Context) bool { return true }
+func (s *stubClient) IsHealthy(_ context.Context) bool { return s.healthy }
 
 func TestCachedClient_EvictsOldestEntriesWhenFull(t *testing.T) {
 	client := NewCachedClient(&stubClient{}, WithMaxEntries(5))
@@ -193,4 +196,119 @@ func TestCachedClient_StartCleanupLoop_PrunesExpiredEntries(t *testing.T) {
 	}
 
 	t.Fatalf("Size() = %d, want 0 after the cleanup loop pruned the expired entry", cached.Size())
+}
+
+func TestCachedClient_ServesFromCacheWithinTTL(t *testing.T) {
+	stub := &stubClient{}
+	client := NewCachedClient(stub, WithCacheTTL(time.Hour))
+
+	for range 3 {
+		if _, err := client.GetRepositoryInfo(context.Background(), "library", "nginx"); err != nil {
+			t.Fatalf("GetRepositoryInfo() error = %v", err)
+		}
+	}
+
+	if got := stub.calls.Load(); got != 1 {
+		t.Errorf("underlying calls = %d, want 1: reads inside the TTL must be cache hits", got)
+	}
+}
+
+func TestCachedClient_RefetchesExpiredEntry(t *testing.T) {
+	stub := &stubClient{}
+	// A zero TTL expires every entry on arrival, which exercises the miss
+	// branch without sleeping.
+	client := NewCachedClient(stub, WithCacheTTL(0))
+
+	for range 2 {
+		if _, err := client.GetRepositoryInfo(context.Background(), "library", "nginx"); err != nil {
+			t.Fatalf("GetRepositoryInfo() error = %v", err)
+		}
+	}
+
+	if got := stub.calls.Load(); got != 2 {
+		t.Errorf("underlying calls = %d, want 2: an expired entry must be refetched", got)
+	}
+}
+
+func TestCachedClient_ClearCacheDropsEntries(t *testing.T) {
+	stub := &stubClient{}
+	client := NewCachedClient(stub, WithCacheTTL(time.Hour))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), "library", "nginx"); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+	if got := client.Size(); got != 1 {
+		t.Fatalf("Size() = %d, want 1 after one lookup", got)
+	}
+
+	client.ClearCache()
+	if got := client.Size(); got != 0 {
+		t.Errorf("Size() = %d, want 0 after ClearCache", got)
+	}
+
+	if _, err := client.GetRepositoryInfo(context.Background(), "library", "nginx"); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v", err)
+	}
+	if got := stub.calls.Load(); got != 2 {
+		t.Errorf("underlying calls = %d, want 2: a cleared cache must refetch", got)
+	}
+}
+
+func TestCachedClient_IsHealthyDelegates(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		client := NewCachedClient(&stubClient{healthy: healthy})
+		if got := client.IsHealthy(context.Background()); got != healthy {
+			t.Errorf("IsHealthy() = %v, want %v: the wrapper must not mask the upstream state", got, healthy)
+		}
+	}
+}
+
+func TestRateLimitedClient_IsHealthyDelegates(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		client := NewRateLimitedClient(&stubClient{healthy: healthy})
+		if got := client.IsHealthy(context.Background()); got != healthy {
+			t.Errorf("IsHealthy() = %v, want %v: health checks must bypass the limiter, not be gated by it", got, healthy)
+		}
+	}
+}
+
+func TestRateLimitedClient_GatesRequests(t *testing.T) {
+	stub := &stubClient{}
+	client := NewRateLimitedClient(stub, WithRateLimit(0.001), WithBurst(1))
+
+	if _, err := client.GetRepositoryInfo(context.Background(), "library", "nginx"); err != nil {
+		t.Fatalf("GetRepositoryInfo() error = %v, want nil: the single burst token must let the first call through", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	if _, err := client.GetRepositoryInfo(ctx, "library", "nginx"); err == nil {
+		t.Error("GetRepositoryInfo() = nil error, want the second call blocked by the rate limiter")
+	}
+}
+
+func TestCachedClient_ConcurrentAccess(t *testing.T) {
+	stub := &stubClient{}
+	client := NewCachedClient(stub, WithCacheTTL(time.Hour), WithMaxEntries(10))
+
+	var wg sync.WaitGroup
+
+	for i := range 50 {
+		wg.Go(func() {
+			// Every goroutine also races on one shared key, so the hit, miss and
+			// store paths run concurrently under the race detector.
+			for _, key := range []string{"shared", fmt.Sprintf("repo-%d", i)} {
+				if _, err := client.GetRepositoryInfo(context.Background(), "library", key); err != nil {
+					t.Errorf("GetRepositoryInfo() error = %v", err)
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+
+	if got := client.Size(); got > 10 {
+		t.Errorf("Size() = %d, want <= 10: the cap must hold under concurrency", got)
+	}
 }
