@@ -231,6 +231,31 @@ spec:
                   the cluster
                 format: date-time
                 type: string
+              ghcrData:
+                description: |-
+                  GHCRData contains package metadata from GitHub Container Registry
+                  (only populated for ghcr.io images)
+                properties:
+                  lastUpdatedAt:
+                    description: LastUpdatedAt is when GitHub last updated the package
+                    format: date-time
+                    type: string
+                  packageURL:
+                    description: PackageURL is the GitHub page for the package
+                    type: string
+                  publishedAt:
+                    description: PublishedAt is when the package was first published
+                    format: date-time
+                    type: string
+                  versionCount:
+                    description: VersionCount is how many published versions the package
+                      has
+                    type: integer
+                  visibility:
+                    description: Visibility is the package visibility GitHub reports
+                      (public, private, internal)
+                    type: string
+                type: object
               imageAge:
                 description: ImageAge is the computed age of the image since it was
                   published (e.g., "45 days")

@@ -53,6 +53,7 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/internal/controller"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/ghcr"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/secrets"
 	// +kubebuilder:scaffold:imports
@@ -101,6 +102,10 @@ func main() {
 	var dockerHubCacheMaxEntries int
 	var dockerHubRateLimit float64
 	var dockerHubRateBurst int
+
+	// GitHub Container Registry configuration flags
+	var ghcrEnabled bool
+	var githubToken string
 
 	// Quay.io configuration flags
 	var quayEnabled bool
@@ -184,6 +189,13 @@ func main() {
 		"Rate limit for Quay.io API requests per second (default 5)")
 	flag.IntVar(&quayRateBurst, "quay-rate-burst", quaylib.DefaultRateBurst,
 		"Burst size for Quay.io API rate limiting (default 10)")
+
+	// GitHub Container Registry flags. Opt-in, because every package endpoint
+	// requires a token even for public packages.
+	flag.BoolVar(&ghcrEnabled, "ghcr-enabled", false,
+		"Enable GitHub Container Registry enrichment for ghcr.io images (requires --github-token or GITHUB_TOKEN)")
+	flag.StringVar(&githubToken, "github-token", "",
+		"GitHub token used for ghcr.io package lookups (can also use GITHUB_TOKEN env var)")
 
 	// Pyxis API key secret flags
 	flag.StringVar(&pyxisAPIKeySecretName, "pyxis-api-key-secret-name", "",
@@ -407,6 +419,20 @@ func main() {
 			baseDockerHubClient, dockerHubCacheTTL, dockerHubRateLimit, dockerHubRateBurst, dockerHubCacheMaxEntries)
 	}
 
+	// Initialize the GitHub Container Registry client if enabled
+	var ghcrClient ghcr.Client
+	if ghcrEnabled {
+		if githubToken == "" {
+			githubToken = confkit.EnvString("GITHUB_TOKEN", "")
+		}
+		if githubToken == "" {
+			setupLog.Info("GHCR enrichment is enabled without a token: " +
+				"GitHub rejects package lookups, so ghcr.io images stay unenriched")
+		}
+		setupLog.Info("GHCR integration enabled")
+		ghcrClient = ghcr.NewHTTPClient(githubToken)
+	}
+
 	// Initialize Quay.io client if enabled
 	var quayClient quaylib.RepositoryReader
 	if quayEnabled {
@@ -430,6 +456,7 @@ func main() {
 		PyxisClient:     pyxisClient,
 		DockerHubClient: dockerHubClient,
 		QuayClient:      quayClient,
+		GHCRClient:      ghcrClient,
 		Recorder:        mgr.GetEventRecorderFor("imagecertinfo-controller"), //nolint:staticcheck
 		OrphanRetention: orphanRetention,
 	}
@@ -467,9 +494,10 @@ func main() {
 
 	// Start the periodic refresh loop. It refreshes CRs for every registry, so
 	// it runs whenever any enrichment client is enabled, not just Pyxis.
-	if refreshLoopEnabled(pyxisRefreshInterval, pyxisClient, dockerHubClient, quayClient) {
+	if refreshLoopEnabled(pyxisRefreshInterval, pyxisClient, dockerHubClient, quayClient, ghcrClient) {
 		setupLog.Info("Starting periodic refresh loop", "interval", pyxisRefreshInterval,
-			"pyxis", pyxisClient != nil, "dockerhub", dockerHubClient != nil, "quay", quayClient != nil)
+			"pyxis", pyxisClient != nil, "dockerhub", dockerHubClient != nil,
+			"quay", quayClient != nil, "ghcr", ghcrClient != nil)
 		addRunnable(mgr, "refresh loop", func(ctx context.Context) error {
 			return podReconciler.StartRefreshLoop(ctx, pyxisRefreshInterval)
 		})

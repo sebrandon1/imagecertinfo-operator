@@ -48,6 +48,7 @@ import (
 	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
+	"github.com/sebrandon1/imagecertinfo-operator/pkg/ghcr"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/pyxis"
 )
@@ -3547,5 +3548,279 @@ func TestPodReconciler_RefreshAllImages_SkipsOrphansWhenRetentionEnabled(t *test
 	if afterRefresh.Status.CertificationStatus != securityv1alpha1.CertificationStatusCertified {
 		t.Errorf("CertificationStatus = %v, want Certified: without retention every CR is refreshed",
 			afterRefresh.Status.CertificationStatus)
+	}
+}
+
+const (
+	ghcrRepository  = "example/app"
+	ghcrVisibility  = "public"
+	ghcrPackageName = "app"
+	ghcrSoloName    = "solo"
+	ghcrOwner       = "org"
+	ghcrPrivate     = "private"
+)
+
+// ghcrTestCR is a minimal ghcr.io CR for the GHCR enrichment tests.
+func ghcrTestCR() *securityv1alpha1.ImageCertificationInfo {
+	cr := &securityv1alpha1.ImageCertificationInfo{
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "ghcr.io/example/app@" + testDigest,
+			Registry:           RegistryGHCR,
+			Repository:         ghcrRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+		},
+	}
+	cr.Name = testCRName
+
+	return cr
+}
+
+type stubGHCRClient struct {
+	info   *ghcr.PackageInfo
+	err    error
+	called bool
+	owner  string
+	name   string
+}
+
+func (s *stubGHCRClient) GetPackage(_ context.Context, owner, name string) (*ghcr.PackageInfo, error) {
+	s.called = true
+	s.owner = owner
+	s.name = name
+
+	return s.info, s.err
+}
+
+func (s *stubGHCRClient) IsHealthy(_ context.Context) bool { return true }
+
+func TestParseGHCRRepo(t *testing.T) {
+	tests := []struct {
+		repository string
+		owner      string
+		name       string
+	}{
+		{repository: ghcrOwner + "/app", owner: ghcrOwner, name: ghcrPackageName},
+		{repository: ghcrOwner + "/team/app", owner: ghcrOwner, name: ghcrPackageName},
+		{repository: "/" + ghcrOwner + "/app/", owner: ghcrOwner, name: ghcrPackageName},
+		{repository: ghcrSoloName, owner: ghcrSoloName, name: ghcrSoloName},
+		{repository: "", owner: "", name: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.repository, func(t *testing.T) {
+			owner, name := parseGHCRRepo(tt.repository)
+			if owner != tt.owner || name != tt.name {
+				t.Errorf("parseGHCRRepo(%q) = %q/%q, want %q/%q",
+					tt.repository, owner, name, tt.owner, tt.name)
+			}
+		})
+	}
+}
+
+func TestPodReconciler_CheckGHCRData(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	ref := &image.Reference{Registry: RegistryGHCR, Repository: ghcrRepository, Digest: testDigest}
+
+	t.Run("stores package metadata", func(t *testing.T) {
+		cr := ghcrTestCR()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
+		stub := &stubGHCRClient{info: &ghcr.PackageInfo{
+			Visibility:   ghcrVisibility,
+			VersionCount: 4,
+			HTMLURL:      "https://github.com/orgs/example/packages/container/app",
+			CreatedAt:    time.Now().Add(-48 * time.Hour),
+			UpdatedAt:    time.Now(),
+		}}
+
+		reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, GHCRClient: stub}
+
+		if err := reconciler.checkGHCRData(ctx, testCRName, ref); err != nil {
+			t.Fatalf("checkGHCRData() error = %v, want nil", err)
+		}
+
+		if stub.owner != "example" || stub.name != ghcrPackageName {
+			t.Errorf("lookup = %s/%s, want example/%s", stub.owner, stub.name, ghcrPackageName)
+		}
+
+		var updated securityv1alpha1.ImageCertificationInfo
+		if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updated); err != nil {
+			t.Fatalf("get CR: %v", err)
+		}
+
+		if updated.Status.GHCRData == nil {
+			t.Fatal("GHCRData = nil, want it populated")
+		}
+		if updated.Status.GHCRData.Visibility != ghcrVisibility || updated.Status.GHCRData.VersionCount != 4 {
+			t.Errorf("GHCRData = %+v, want visibility public and 4 versions", updated.Status.GHCRData)
+		}
+		if updated.Status.GHCRData.PublishedAt == nil || updated.Status.GHCRData.LastUpdatedAt == nil {
+			t.Errorf("GHCRData = %+v, want both timestamps set", updated.Status.GHCRData)
+		}
+	})
+
+	t.Run("clears metadata when the package disappears", func(t *testing.T) {
+		cr := ghcrTestCR()
+		cr.Status.GHCRData = &securityv1alpha1.GHCRData{Visibility: ghcrVisibility}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
+		reconciler := &PodReconciler{
+			Client:     fakeClient,
+			Scheme:     scheme,
+			GHCRClient: &stubGHCRClient{err: ghcr.ErrNotFound},
+		}
+
+		if err := reconciler.checkGHCRData(ctx, testCRName, ref); err != nil {
+			t.Fatalf("checkGHCRData() error = %v, want nil", err)
+		}
+
+		var updated securityv1alpha1.ImageCertificationInfo
+		if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updated); err != nil {
+			t.Fatalf("get CR: %v", err)
+		}
+		if updated.Status.GHCRData != nil {
+			t.Errorf("GHCRData = %+v, want nil after the package disappeared", updated.Status.GHCRData)
+		}
+	})
+
+	t.Run("keeps metadata when GitHub rejects the token", func(t *testing.T) {
+		cr := ghcrTestCR()
+		cr.Status.GHCRData = &securityv1alpha1.GHCRData{Visibility: ghcrVisibility}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
+		reconciler := &PodReconciler{
+			Client:     fakeClient,
+			Scheme:     scheme,
+			GHCRClient: &stubGHCRClient{err: ghcr.ErrUnauthorized},
+		}
+
+		if err := reconciler.checkGHCRData(ctx, testCRName, ref); err != nil {
+			t.Fatalf("checkGHCRData() error = %v, want nil: an auth failure is not retried", err)
+		}
+
+		var updated securityv1alpha1.ImageCertificationInfo
+		if err := fakeClient.Get(ctx, client.ObjectKey{Name: testCRName}, &updated); err != nil {
+			t.Fatalf("get CR: %v", err)
+		}
+		if updated.Status.GHCRData == nil {
+			t.Error("GHCRData = nil, want the previous enrichment kept")
+		}
+	})
+
+	t.Run("returns an error so the enrichment is retried", func(t *testing.T) {
+		cr := ghcrTestCR()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
+		reconciler := &PodReconciler{
+			Client:     fakeClient,
+			Scheme:     scheme,
+			GHCRClient: &stubGHCRClient{err: errors.New("boom")},
+		}
+
+		if err := reconciler.checkGHCRData(ctx, testCRName, ref); err == nil {
+			t.Error("checkGHCRData() = nil, want an error so the request is retried")
+		}
+	})
+
+	t.Run("does nothing without a client", func(t *testing.T) {
+		reconciler := &PodReconciler{Scheme: scheme}
+
+		if err := reconciler.checkGHCRData(ctx, testCRName, ref); err != nil {
+			t.Errorf("checkGHCRData() error = %v, want nil when enrichment is disabled", err)
+		}
+	})
+}
+
+func TestPodReconciler_EnrichDispatchesToGHCR(t *testing.T) {
+	cr := ghcrTestCR()
+
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
+	stub := &stubGHCRClient{info: &ghcr.PackageInfo{Visibility: ghcrVisibility, VersionCount: 1}}
+
+	reconciler := &PodReconciler{Client: fakeClient, Scheme: scheme, GHCRClient: stub}
+
+	item := enrichRequest{crName: testCRName, ref: image.Reference{
+		Registry: RegistryGHCR, Repository: ghcrRepository, Digest: testDigest,
+	}}
+
+	if err := reconciler.enrich(context.Background(), item); err != nil {
+		t.Fatalf("enrich() error = %v, want nil", err)
+	}
+	if !stub.called {
+		t.Error("the GHCR client was not called for a ghcr.io image")
+	}
+}
+
+func TestApplyGHCRResult(t *testing.T) {
+	info := &ghcr.PackageInfo{Visibility: ghcrVisibility, VersionCount: 3}
+	existing := func() *securityv1alpha1.GHCRData {
+		return &securityv1alpha1.GHCRData{Visibility: ghcrPrivate}
+	}
+
+	tests := []struct {
+		name        string
+		lookupErr   error
+		info        *ghcr.PackageInfo
+		start       *securityv1alpha1.GHCRData
+		wantChanged bool
+		wantErr     bool
+		wantData    string
+	}{
+		{
+			name: "success stores the payload", info: info,
+			wantChanged: true, wantData: ghcrVisibility,
+		},
+		{
+			name: "missing package clears the payload", lookupErr: ghcr.ErrNotFound, start: existing(),
+			wantChanged: true, wantData: "",
+		},
+		{
+			name: "missing package without a payload is a no-op", lookupErr: ghcr.ErrNotFound,
+			wantChanged: false, wantData: "",
+		},
+		{
+			name: "rejected token keeps the previous payload", lookupErr: ghcr.ErrUnauthorized, start: existing(),
+			wantChanged: false, wantData: ghcrPrivate,
+		},
+		{
+			name:      "transient error asks for a retry and keeps the payload",
+			lookupErr: errors.New("boom"), start: existing(),
+			wantChanged: false, wantErr: true, wantData: ghcrPrivate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := &securityv1alpha1.ImageCertificationInfo{
+				Status: securityv1alpha1.ImageCertificationInfoStatus{GHCRData: tt.start},
+			}
+			cr.Name = testCRName
+
+			changed, err := applyGHCRResult(context.Background(), cr, tt.info, tt.lookupErr)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("applyGHCRResult() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if changed != tt.wantChanged {
+				t.Errorf("applyGHCRResult() changed = %v, want %v", changed, tt.wantChanged)
+			}
+
+			got := ""
+			if cr.Status.GHCRData != nil {
+				got = cr.Status.GHCRData.Visibility
+			}
+			if got != tt.wantData {
+				t.Errorf("GHCRData visibility = %q, want %q", got, tt.wantData)
+			}
+		})
 	}
 }

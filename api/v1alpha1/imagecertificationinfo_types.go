@@ -171,6 +171,29 @@ type DockerHubData struct {
 }
 
 // QuayData contains metadata from Quay.io API
+// GHCRData contains package metadata read from GitHub Container Registry.
+type GHCRData struct {
+	// Visibility is the package visibility GitHub reports (public, private, internal)
+	// +optional
+	Visibility string `json:"visibility,omitempty"`
+
+	// VersionCount is how many published versions the package has
+	// +optional
+	VersionCount int `json:"versionCount,omitempty"`
+
+	// PackageURL is the GitHub page for the package
+	// +optional
+	PackageURL string `json:"packageURL,omitempty"`
+
+	// PublishedAt is when the package was first published
+	// +optional
+	PublishedAt *metav1.Time `json:"publishedAt,omitempty"`
+
+	// LastUpdatedAt is when GitHub last updated the package
+	// +optional
+	LastUpdatedAt *metav1.Time `json:"lastUpdatedAt,omitempty"`
+}
+
 type QuayData struct {
 	// IsPublic indicates whether the repository is publicly visible
 	// +optional
@@ -298,6 +321,11 @@ type ImageCertificationInfoStatus struct {
 	// QuayData contains metadata from Quay.io (only populated for quay.io images)
 	// +optional
 	QuayData *QuayData `json:"quayData,omitempty"`
+
+	// GHCRData contains package metadata from GitHub Container Registry
+	// (only populated for ghcr.io images)
+	// +optional
+	GHCRData *GHCRData `json:"ghcrData,omitempty"`
 
 	// PodReferences lists all pods currently using this image
 	// +optional
