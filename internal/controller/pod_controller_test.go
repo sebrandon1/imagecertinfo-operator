@@ -3371,3 +3371,181 @@ func TestPodReconciler_CheckDockerHubData_DowngradesStaleTrust(t *testing.T) {
 		t.Error("IsVerifiedPublisher = true, want false")
 	}
 }
+
+func orphanCR(name string, lastSeen *metav1.Time, refs []securityv1alpha1.PodReference) *securityv1alpha1.ImageCertificationInfo {
+	return &securityv1alpha1.ImageCertificationInfo{
+		Name: name,
+		Spec: securityv1alpha1.ImageCertificationInfoSpec{
+			ImageDigest:        testDigest,
+			FullImageReference: "registry.redhat.io/ubi8/ubi@" + testDigest,
+			Registry:           testRegistry,
+			Repository:         testRepository,
+		},
+		Status: securityv1alpha1.ImageCertificationInfoStatus{
+			RegistryType:        securityv1alpha1.RegistryTypeRedHat,
+			CertificationStatus: securityv1alpha1.CertificationStatusUnknown,
+			PodReferences:       refs,
+			LastSeenAt:          lastSeen,
+		},
+	}
+}
+
+func TestPodReconciler_CleanupStaleReferences_OrphanRetention(t *testing.T) {
+	retention := time.Hour
+	old := metav1.NewTime(time.Now().Add(-2 * retention))
+	fresh := metav1.NewTime(time.Now().Add(-retention / 2))
+	liveRef := []securityv1alpha1.PodReference{{Namespace: testNamespace, Name: testExistingPod}}
+
+	tests := []struct {
+		name        string
+		retention   time.Duration
+		lastSeen    *metav1.Time
+		refs        []securityv1alpha1.PodReference
+		podExists   bool
+		wantDeleted bool
+	}{
+		{
+			name:        "orphan older than the retention is deleted",
+			retention:   retention,
+			lastSeen:    &old,
+			wantDeleted: true,
+		},
+		{
+			name:      "orphan younger than the retention is kept",
+			retention: retention,
+			lastSeen:  &fresh,
+		},
+		{
+			name:      "orphan without LastSeenAt is kept",
+			retention: retention,
+			lastSeen:  nil,
+		},
+		{
+			name:      "CR with a live pod reference is kept",
+			retention: retention,
+			lastSeen:  &old,
+			refs:      liveRef,
+			podExists: true,
+		},
+		{
+			name:      "retention disabled keeps everything",
+			retention: 0,
+			lastSeen:  &old,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := newTestScheme()
+			cr := orphanCR("registry.redhat.io.ubi8.ubi.orphan", tt.lastSeen, tt.refs)
+
+			builder := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(cr).
+				WithStatusSubresource(cr)
+			if tt.podExists {
+				pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+				pod.Name = testExistingPod
+				pod.Namespace = testNamespace
+
+				builder = builder.WithObjects(pod)
+			}
+
+			fakeClient := builder.Build()
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &PodReconciler{
+				Client:          fakeClient,
+				Scheme:          scheme,
+				Recorder:        recorder,
+				OrphanRetention: tt.retention,
+			}
+
+			deletedBefore := testutil.ToFloat64(metrics.ImagesGarbageCollectedTotal)
+
+			if err := reconciler.CleanupStaleReferences(ctx); err != nil {
+				t.Fatalf("CleanupStaleReferences() error = %v", err)
+			}
+
+			var got securityv1alpha1.ImageCertificationInfo
+			err := fakeClient.Get(ctx, client.ObjectKey{Name: cr.Name}, &got)
+
+			switch {
+			case tt.wantDeleted && !apierrors.IsNotFound(err):
+				t.Fatalf("CR still exists (err = %v), want it deleted", err)
+			case !tt.wantDeleted && err != nil:
+				t.Fatalf("CR was removed (err = %v), want it kept", err)
+			}
+
+			deleted := testutil.ToFloat64(metrics.ImagesGarbageCollectedTotal) - deletedBefore
+			if want := map[bool]float64{true: 1, false: 0}[tt.wantDeleted]; deleted != want {
+				t.Errorf("images_garbage_collected_total delta = %v, want %v", deleted, want)
+			}
+
+			select {
+			case event := <-recorder.Events:
+				if !tt.wantDeleted {
+					t.Errorf("unexpected event %q, want none", event)
+				} else if !strings.Contains(event, EventReasonGarbageCollected) {
+					t.Errorf("event = %q, want reason %s", event, EventReasonGarbageCollected)
+				}
+			default:
+				if tt.wantDeleted {
+					t.Errorf("no event recorded, want one with reason %s", EventReasonGarbageCollected)
+				}
+			}
+		})
+	}
+}
+
+func TestPodReconciler_RefreshAllImages_SkipsOrphansWhenRetentionEnabled(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	oldCheck := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	oldSeen := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	cr := orphanCR("registry.redhat.io.ubi8.ubi.orphan", &oldSeen, nil)
+	cr.Status.LastPyxisCheckAt = &oldCheck
+
+	newReconciler := func(retention time.Duration) *PodReconciler {
+		return &PodReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(scheme).WithObjects(cr).WithStatusSubresource(cr).Build(),
+			Scheme:          scheme,
+			PyxisClient:     &MockPyxisClient{CertData: &pyxis.CertificationData{ProjectID: "ubi8-ubi", HealthIndex: "A"}},
+			OrphanRetention: retention,
+		}
+	}
+
+	// With retention enabled the orphan is not worth an API call, so it is
+	// skipped and keeps its status. The retention window here is long enough
+	// that cleanup would not have deleted it yet.
+	skipping := newReconciler(24 * time.Hour)
+	if err := skipping.RefreshAllImages(ctx, 0); err != nil {
+		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+
+	var afterSkip securityv1alpha1.ImageCertificationInfo
+	if err := skipping.Get(ctx, client.ObjectKey{Name: cr.Name}, &afterSkip); err != nil {
+		t.Fatalf("get CR: %v", err)
+	}
+	if afterSkip.Status.CertificationStatus != securityv1alpha1.CertificationStatusUnknown {
+		t.Errorf("CertificationStatus = %v, want Unknown: an orphan must not be refreshed",
+			afterSkip.Status.CertificationStatus)
+	}
+
+	// With retention disabled the previous behavior is unchanged: every CR is
+	// refreshed regardless of references.
+	refreshing := newReconciler(0)
+	if err := refreshing.RefreshAllImages(ctx, 0); err != nil {
+		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+
+	var afterRefresh securityv1alpha1.ImageCertificationInfo
+	if err := refreshing.Get(ctx, client.ObjectKey{Name: cr.Name}, &afterRefresh); err != nil {
+		t.Fatalf("get CR: %v", err)
+	}
+	if afterRefresh.Status.CertificationStatus != securityv1alpha1.CertificationStatusCertified {
+		t.Errorf("CertificationStatus = %v, want Certified: without retention every CR is refreshed",
+			afterRefresh.Status.CertificationStatus)
+	}
+}

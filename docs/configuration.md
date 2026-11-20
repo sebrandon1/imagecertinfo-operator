@@ -110,6 +110,7 @@ available for finer control.
 |------|-------------|---------|
 | `--watch-namespaces` | Comma-separated namespaces to watch. Pods and `ImageCertificationInfo` resources outside the list are ignored (default: all namespaces) | (none) |
 | `--cleanup-interval` | Interval for cleaning up stale pod references. Must be greater than zero | `5m` |
+| `--orphan-retention` | Delete an `ImageCertificationInfo` once it has had no pod reference for this long (`0` disables deletion and keeps all inventory) | `0` |
 | `--enrichment-workers` | Number of concurrent workers enriching newly discovered images | `4` |
 
 Failed enrichments are retried with exponential backoff up to 5 times before the
