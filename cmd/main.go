@@ -175,8 +175,11 @@ func main() {
 	flag.StringVar(&pyxisAPIKeySecretKey, "pyxis-api-key-secret-key", "api-key",
 		"Key within the Secret that contains the Pyxis API key (default: api-key)")
 
+	// Production logging by default: JSON output without stack traces on every
+	// warning, which is what log pipelines expect. `make run` passes
+	// --zap-devel=true for human-readable local output.
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
