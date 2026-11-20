@@ -42,8 +42,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	quaylib "github.com/sebrandon1/go-quay/lib"
 	securityv1alpha1 "github.com/sebrandon1/imagecertinfo-operator/api/v1alpha1"
+	"github.com/sebrandon1/imagecertinfo-operator/internal/metrics"
 	"github.com/sebrandon1/imagecertinfo-operator/internal/version"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/dockerhub"
 	"github.com/sebrandon1/imagecertinfo-operator/pkg/image"
@@ -724,10 +726,30 @@ func TestPodReconciler_RefreshAllImages(t *testing.T) {
 		PyxisClient: mockPyxis,
 	}
 
+	refreshedBefore := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultRefreshed))
+	skippedBefore := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultSkipped))
+	errorBefore := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultError))
+
 	// Run refresh
 	err := reconciler.RefreshAllImages(ctx, time.Hour)
 	if err != nil {
 		t.Fatalf("RefreshAllImages() error = %v", err)
+	}
+
+	// The cycle must publish its per-image outcomes: every CR is accounted for
+	// once, and a clean cycle leaves no failures behind.
+	refreshed := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultRefreshed)) - refreshedBefore
+	skipped := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultSkipped)) - skippedBefore
+	failed := testutil.ToFloat64(metrics.RefreshImagesTotal.WithLabelValues(metrics.RefreshResultError)) - errorBefore
+	if total := refreshed + skipped + failed; total != 3 {
+		t.Errorf("refresh_images_total outcomes sum = %v, want 3 (refreshed=%v skipped=%v error=%v)",
+			total, refreshed, skipped, failed)
+	}
+	if failed != 0 {
+		t.Errorf("refresh_images_total{result=error} delta = %v, want 0", failed)
+	}
+	if got := testutil.ToFloat64(metrics.RefreshImageErrorsLastCycle); got != 0 {
+		t.Errorf("refresh_image_errors_last_cycle = %v, want 0 after a clean cycle", got)
 	}
 
 	// Verify the Red Hat CR that needed refresh was updated

@@ -1288,6 +1288,10 @@ func (r *PodReconciler) RefreshAllImages(ctx context.Context, minRefreshAge time
 
 	duration := time.Since(start)
 	metrics.RecordRefreshCycle(duration.Seconds())
+	metrics.RecordRefreshResult(metrics.RefreshResultRefreshed, refreshed)
+	metrics.RecordRefreshResult(metrics.RefreshResultSkipped, skipped)
+	metrics.RecordRefreshResult(metrics.RefreshResultError, errorCount)
+	metrics.SetRefreshErrorCount(errorCount)
 
 	logger.Info("refresh cycle completed",
 		"duration", duration,

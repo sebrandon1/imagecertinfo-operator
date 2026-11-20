@@ -193,6 +193,25 @@ var (
 		},
 	)
 
+	// RefreshImagesTotal tracks refresh-cycle outcomes per image
+	RefreshImagesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: MetricsNamespace,
+			Name:      "refresh_images_total",
+			Help:      "Total number of images processed by refresh cycles, by result",
+		},
+		[]string{labelResult},
+	)
+
+	// RefreshImageErrorsLastCycle tracks images that failed in the latest cycle
+	RefreshImageErrorsLastCycle = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: MetricsNamespace,
+			Name:      "refresh_image_errors_last_cycle",
+			Help:      "Number of images that failed to refresh in the last completed cycle",
+		},
+	)
+
 	// CertificationStatusChangesTotal tracks certification status changes
 	CertificationStatusChangesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -313,6 +332,8 @@ func init() {
 		RefreshCyclesTotal,
 		RefreshDurationSeconds,
 		ImagesRefreshedTotal,
+		RefreshImagesTotal,
+		RefreshImageErrorsLastCycle,
 		CertificationStatusChangesTotal,
 		// Docker Hub API metrics
 		DockerHubRequestsTotal,
@@ -455,6 +476,28 @@ func RecordRefreshCycle(durationSeconds float64) {
 // RecordImageRefreshed records an individual image refresh
 func RecordImageRefreshed() {
 	ImagesRefreshedTotal.Inc()
+}
+
+// RefreshResult values label the refresh_images_total counter.
+const (
+	RefreshResultRefreshed = "refreshed"
+	RefreshResultSkipped   = "skipped"
+	RefreshResultError     = "error"
+)
+
+// RecordRefreshResult records the per-image outcome counts of a refresh cycle.
+func RecordRefreshResult(result string, n int) {
+	if n <= 0 {
+		return
+	}
+
+	RefreshImagesTotal.WithLabelValues(result).Add(float64(n))
+}
+
+// SetRefreshErrorCount records how many images failed in the last cycle. It is
+// a gauge so a clean cycle resets the previous cycle's failures to zero.
+func SetRefreshErrorCount(n int) {
+	RefreshImageErrorsLastCycle.Set(float64(n))
 }
 
 // RecordCertificationStatusChange records a certification status change

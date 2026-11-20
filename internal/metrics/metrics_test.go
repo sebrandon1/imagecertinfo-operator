@@ -40,6 +40,7 @@ func TestMetricsRegistered(t *testing.T) {
 	ReconcileDuration.WithLabelValues("test")
 	EventsEmitted.WithLabelValues("test", "test")
 	CertificationStatusChangesTotal.WithLabelValues("test", "test")
+	RefreshImagesTotal.WithLabelValues("test")
 	DockerHubRequestsTotal.WithLabelValues("test", "test")
 	DockerHubRequestDuration.WithLabelValues("test")
 	DockerHubCacheHits.WithLabelValues("test")
@@ -68,6 +69,8 @@ func TestMetricsRegistered(t *testing.T) {
 		"imagecertinfo_refresh_cycles_total":               {},
 		"imagecertinfo_refresh_duration_seconds":           {},
 		"imagecertinfo_images_refreshed_total":             {},
+		"imagecertinfo_refresh_images_total":               {},
+		"imagecertinfo_refresh_image_errors_last_cycle":    {},
 		"imagecertinfo_certification_status_changes_total": {},
 		"imagecertinfo_dockerhub_requests_total":           {},
 		"imagecertinfo_dockerhub_request_duration_seconds": {},
@@ -250,5 +253,40 @@ func TestUpdateInventory_QuayDataDoesNotSetHealth(t *testing.T) {
 
 	if got := testutil.ToFloat64(ImagesByHealth.WithLabelValues("A")); got != 0 {
 		t.Errorf("ImagesByHealth{A} = %v, want 0: the health gauge stays Pyxis-only", got)
+	}
+}
+
+func TestRecordRefreshResult(t *testing.T) {
+	refreshedBefore := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultRefreshed))
+	skippedBefore := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultSkipped))
+	errorBefore := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultError))
+
+	RecordRefreshResult(RefreshResultRefreshed, 3)
+	RecordRefreshResult(RefreshResultError, 1)
+	RecordRefreshResult(RefreshResultSkipped, 0)
+	RecordRefreshResult(RefreshResultSkipped, -1)
+
+	if got := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultRefreshed)) - refreshedBefore; got != 3 {
+		t.Errorf("refreshed delta = %v, want 3", got)
+	}
+	if got := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultError)) - errorBefore; got != 1 {
+		t.Errorf("error delta = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(RefreshImagesTotal.WithLabelValues(RefreshResultSkipped)) - skippedBefore; got != 0 {
+		t.Errorf("skipped delta = %v, want 0: a non-positive count must be a no-op", got)
+	}
+}
+
+func TestSetRefreshErrorCount(t *testing.T) {
+	SetRefreshErrorCount(2)
+	if got := testutil.ToFloat64(RefreshImageErrorsLastCycle); got != 2 {
+		t.Errorf("last-cycle errors = %v, want 2", got)
+	}
+
+	// A clean cycle must reset the previous cycle's failures, which a counter
+	// could not do.
+	SetRefreshErrorCount(0)
+	if got := testutil.ToFloat64(RefreshImageErrorsLastCycle); got != 0 {
+		t.Errorf("last-cycle errors = %v, want 0 after a clean cycle", got)
 	}
 }
