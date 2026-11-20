@@ -53,6 +53,8 @@ that Quay is failing.
 | `imagecertinfo_refresh_cycles_total` | Counter | - | Completed refresh cycles |
 | `imagecertinfo_refresh_duration_seconds` | Histogram | - | Refresh cycle duration |
 | `imagecertinfo_images_refreshed_total` | Counter | - | Individual images refreshed |
+| `imagecertinfo_refresh_images_total` | Counter | `result` (`refreshed`, `skipped`, `error`) | Images processed per refresh cycle, by outcome |
+| `imagecertinfo_refresh_image_errors_last_cycle` | Gauge | - | Images that failed in the last completed cycle; resets to `0` on a clean cycle |
 | `imagecertinfo_certification_status_changes_total` | Counter | `from`, `to` | Certification status changes |
 
 ## Example PromQL Queries
@@ -74,6 +76,9 @@ sum(rate(imagecertinfo_pyxis_cache_hits_total[5m])) * 100
 # Reconciliation error rate
 sum(rate(imagecertinfo_reconcile_total{result="error"}[5m])) /
 sum(rate(imagecertinfo_reconcile_total[5m])) * 100
+
+# Images that failed in the last refresh cycle
+imagecertinfo_refresh_image_errors_last_cycle > 0
 ```
 
 ## Docker Hub API Metrics
