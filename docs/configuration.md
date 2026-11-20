@@ -91,6 +91,19 @@ and counted with `status="denied"` on `imagecertinfo_quay_requests_total`. Becau
 operator has no Quay token flag, a repository that requires authentication is simply
 never enriched.
 
+## Logging
+
+Logs are JSON in production mode, which is what log aggregation pipelines expect.
+Use `--zap-devel=true` for human-readable console output with stack traces while
+developing; `make run` passes it for you. `--zap-log-level` and `--zap-encoder` are
+available for finer control.
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--zap-devel` | Development mode: console-format logs with stack traces | `false` |
+| `--zap-log-level` | Log level (`debug`, `info`, `error`, or an integer) | `info` |
+| `--zap-encoder` | Log encoder (`json` or `console`) | `json` |
+
 ## Reconciliation
 
 | Flag | Description | Default |

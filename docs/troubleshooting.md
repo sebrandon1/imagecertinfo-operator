@@ -1,5 +1,18 @@
 # Troubleshooting
 
+## Logs Are JSON Instead of Readable Text
+
+**Symptoms:** `kubectl logs` shows single-line JSON objects.
+
+The operator logs JSON in production mode. For readable console output while
+running from a host, use `make run` (which passes `--zap-devel`) or set
+`--zap-devel=true` on the Deployment. Pipe JSON logs through `jq` to inspect
+them:
+
+```bash
+kubectl logs -l control-plane=controller-manager -n imagecertinfo-operator-system | jq -r '.msg'
+```
+
 ## Pyxis API Errors
 
 **Symptoms:** Images show `Unknown` certification status, Pyxis-related errors in logs.
