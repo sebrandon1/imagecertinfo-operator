@@ -139,6 +139,7 @@ therefore no longer stops refresh for Docker Hub and Quay.io images.
 | `--metrics-cert-name` | Metrics TLS certificate filename | `tls.crt` |
 | `--metrics-cert-key` | Metrics TLS key filename | `tls.key` |
 | `--health-probe-bind-address` | Address for health probes | `:8081` |
+| `--api-health-checks` | Register a named health check per enrichment API (`/healthz/pyxis`, `/healthz/dockerhub`). Separate from `/readyz`, so an upstream outage never unreadies the operator | `true` |
 
 ## Leader Election
 

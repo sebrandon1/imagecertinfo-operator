@@ -18,9 +18,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 type fakeCachedClient struct {
@@ -262,4 +268,153 @@ func TestParseWatchNamespaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeHealthClient struct {
+	healthy bool
+}
+
+func (f *fakeHealthClient) IsHealthy(_ context.Context) bool {
+	return f.healthy
+}
+
+const (
+	checkPyxis     = "pyxis"
+	checkDockerHub = "dockerhub"
+)
+
+func TestAPIHealthChecks(t *testing.T) {
+	t.Run("healthy client yields a passing check", func(t *testing.T) {
+		checks := apiHealthChecks(namedClient{name: checkPyxis, client: &fakeHealthClient{healthy: true}})
+		if len(checks) != 1 {
+			t.Fatalf("apiHealthChecks() returned %d checks, want 1", len(checks))
+		}
+		if checks[0].name != checkPyxis {
+			t.Errorf("check name = %q, want pyxis", checks[0].name)
+		}
+		if err := checks[0].check(httptest.NewRequest(http.MethodGet, "/healthz/pyxis", nil)); err != nil {
+			t.Errorf("check() error = %v, want nil for a healthy API", err)
+		}
+	})
+
+	t.Run("unhealthy client fails the check and names the API", func(t *testing.T) {
+		checks := apiHealthChecks(namedClient{name: checkDockerHub, client: &fakeHealthClient{healthy: false}})
+		if len(checks) != 1 {
+			t.Fatalf("apiHealthChecks() returned %d checks, want 1", len(checks))
+		}
+		err := checks[0].check(httptest.NewRequest(http.MethodGet, "/healthz/dockerhub", nil))
+		if err == nil {
+			t.Fatal("check() = nil, want an error for an unreachable API")
+		}
+		if !strings.Contains(err.Error(), "dockerhub") {
+			t.Errorf("check() error = %q, want it to name dockerhub", err)
+		}
+	})
+
+	t.Run("clients without a health method are skipped", func(t *testing.T) {
+		checks := apiHealthChecks(
+			namedClient{name: checkPyxis, client: &plainClient{}},
+			namedClient{name: checkDockerHub, client: &fakeHealthClient{healthy: true}},
+		)
+		if len(checks) != 1 {
+			t.Fatalf("apiHealthChecks() returned %d checks, want 1", len(checks))
+		}
+		if checks[0].name != checkDockerHub {
+			t.Errorf("check name = %q, want dockerhub", checks[0].name)
+		}
+	})
+
+	t.Run("nil and typed-nil clients are skipped", func(t *testing.T) {
+		var typedNil *fakeHealthClient
+
+		checks := apiHealthChecks(
+			namedClient{name: checkPyxis, client: nil},
+			namedClient{name: checkDockerHub, client: typedNil},
+		)
+		if len(checks) != 0 {
+			t.Fatalf("apiHealthChecks() returned %d checks, want 0", len(checks))
+		}
+	})
+
+	t.Run("checks keep the order they were given", func(t *testing.T) {
+		checks := apiHealthChecks(
+			namedClient{name: checkPyxis, client: &fakeHealthClient{healthy: true}},
+			namedClient{name: checkDockerHub, client: &fakeHealthClient{healthy: true}},
+		)
+		if len(checks) != 2 {
+			t.Fatalf("apiHealthChecks() returned %d checks, want 2", len(checks))
+		}
+		if checks[0].name != checkPyxis || checks[1].name != checkDockerHub {
+			t.Errorf("check order = [%s %s], want [pyxis dockerhub]", checks[0].name, checks[1].name)
+		}
+	})
+}
+
+// stubManager records health checks instead of serving them.
+type stubManager struct {
+	ctrl.Manager
+
+	checks map[string]healthz.Checker
+	err    error
+}
+
+func (s *stubManager) AddHealthzCheck(name string, check healthz.Checker) error {
+	if s.err != nil {
+		return s.err
+	}
+
+	s.checks[name] = check
+
+	return nil
+}
+
+func TestAddAPIChecks(t *testing.T) {
+	t.Run("registers one check per capable client", func(t *testing.T) {
+		mgr := &stubManager{checks: map[string]healthz.Checker{}}
+
+		err := addAPIChecks(mgr,
+			namedClient{name: checkPyxis, client: &fakeHealthClient{healthy: true}},
+			namedClient{name: checkDockerHub, client: &fakeHealthClient{healthy: false}},
+		)
+		if err != nil {
+			t.Fatalf("addAPIChecks() error = %v, want nil", err)
+		}
+		if len(mgr.checks) != 2 {
+			t.Fatalf("registered %d checks, want 2", len(mgr.checks))
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/healthz/"+checkPyxis, nil)
+		if err := mgr.checks[checkPyxis](req); err != nil {
+			t.Errorf("pyxis check error = %v, want nil for a healthy API", err)
+		}
+		if err := mgr.checks[checkDockerHub](req); err == nil {
+			t.Error("dockerhub check = nil, want an error for an unreachable API")
+		}
+	})
+
+	t.Run("joins registration failures", func(t *testing.T) {
+		mgr := &stubManager{checks: map[string]healthz.Checker{}, err: errors.New("boom")}
+
+		err := addAPIChecks(mgr,
+			namedClient{name: checkPyxis, client: &fakeHealthClient{healthy: true}},
+			namedClient{name: checkDockerHub, client: &fakeHealthClient{healthy: true}},
+		)
+		if err == nil {
+			t.Fatal("addAPIChecks() = nil, want a registration error")
+		}
+		if !strings.Contains(err.Error(), checkPyxis) || !strings.Contains(err.Error(), checkDockerHub) {
+			t.Errorf("addAPIChecks() error = %q, want it to name both checks", err)
+		}
+	})
+
+	t.Run("registers nothing without clients", func(t *testing.T) {
+		mgr := &stubManager{checks: map[string]healthz.Checker{}}
+
+		if err := addAPIChecks(mgr); err != nil {
+			t.Fatalf("addAPIChecks() error = %v, want nil", err)
+		}
+		if len(mgr.checks) != 0 {
+			t.Errorf("registered %d checks, want 0", len(mgr.checks))
+		}
+	})
 }

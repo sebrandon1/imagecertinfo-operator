@@ -19,9 +19,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -108,10 +111,14 @@ func main() {
 	var pyxisAPIKeySecretName string
 	var pyxisAPIKeySecretNamespace string
 	var pyxisAPIKeySecretKey string
+	var apiHealthChecks bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&apiHealthChecks, "api-health-checks", true,
+		"Register a named health check per enrichment API (/healthz/pyxis, /healthz/dockerhub). "+
+			"These are separate from /readyz, so an upstream outage never unreadies the operator")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -468,6 +475,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Named per-API checks answer "can this pod reach Pyxis / Docker Hub?"
+	// without touching readiness: an upstream outage must not unready or
+	// restart the operator. Quay has no health method in its client library.
+	if apiHealthChecks {
+		if err := addAPIChecks(mgr,
+			namedClient{name: "pyxis", client: pyxisClient},
+			namedClient{name: "dockerhub", client: dockerHubClient},
+		); err != nil {
+			setupLog.Error(err, "unable to set up API health checks")
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("starting manager", "version", version.Version)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -614,4 +634,85 @@ func parseWatchNamespaces(csv string) (map[string]cache.Config, error) {
 	}
 
 	return namespaces, nil
+}
+
+// apiHealthChecker is implemented by enrichment clients that can report
+// whether their upstream API is reachable.
+type apiHealthChecker interface {
+	IsHealthy(ctx context.Context) bool
+}
+
+// namedClient pairs a health-check name with the client that backs it.
+type namedClient struct {
+	name   string
+	client any
+}
+
+// namedCheck is a health check ready to be registered under a name.
+type namedCheck struct {
+	name  string
+	check healthz.Checker
+}
+
+// apiHealthChecks builds one named check per enrichment client that implements
+// IsHealthy. Clients that are nil, or that do not expose a health method, are
+// skipped rather than failing startup.
+func apiHealthChecks(clients ...namedClient) []namedCheck {
+	checks := make([]namedCheck, 0, len(clients))
+
+	for _, entry := range clients {
+		if isNilClient(entry.client) {
+			continue
+		}
+
+		checker, ok := entry.client.(apiHealthChecker)
+		if !ok {
+			continue
+		}
+
+		checks = append(checks, namedCheck{name: entry.name, check: apiHealthCheck(entry.name, checker)})
+	}
+
+	return checks
+}
+
+// apiHealthCheck adapts a boolean API probe to the healthz.Check signature.
+func apiHealthCheck(name string, checker apiHealthChecker) healthz.Checker {
+	return func(req *http.Request) error {
+		if !checker.IsHealthy(req.Context()) {
+			return fmt.Errorf("%s API is not reachable", name)
+		}
+
+		return nil
+	}
+}
+
+// addAPIChecks registers the named per-API health checks on the manager.
+func addAPIChecks(mgr ctrl.Manager, clients ...namedClient) error {
+	var errs []error
+
+	for _, check := range apiHealthChecks(clients...) {
+		if err := mgr.AddHealthzCheck(check.name, check.check); err != nil {
+			errs = append(errs, fmt.Errorf("add %s health check: %w", check.name, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// isNilClient reports whether a client is absent, including a typed nil pointer
+// stored in an interface, which would otherwise pass the type assertion and
+// panic when its method is called.
+func isNilClient(c any) bool {
+	if c == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(c)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
